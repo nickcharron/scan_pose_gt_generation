@@ -5,6 +5,8 @@
 #include <boost/filesystem.hpp>
 #include <pcl/common/transforms.h>
 #include <pcl/io/pcd_io.h>
+#include <rosbag/bag.h>
+#include <rosbag/view.h>
 
 #include <beam_utils/log.h>
 #include <beam_utils/math.h>
@@ -19,7 +21,7 @@ void ScanPoseGtGeneration::run() {
 }
 
 void ScanPoseGtGeneration::LoadExtrinsics() {
-  extrinsics_.LoadJSON(inputs.extrinsics);
+  extrinsics_.LoadJSON(inputs_.extrinsics);
 }
 
 void ScanPoseGtGeneration::LoadGtCloud() {
@@ -48,9 +50,9 @@ void ScanPoseGtGeneration::LoadGtCloud() {
   }
 
   Eigen::Matrix4d T_World_GtCloud;
-  T_World_GtCloud << v[0], v[1], v[2], v[3] v[4], v[5], v[6], v[7] v[8], v[9],
-      v[10], v[11] v[12], v[13], v[14], v[15];
-  if (!IsTransformationMatrix(T_World_GtCloud)) {
+  T_World_GtCloud << v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9],
+      v[10], v[11], v[12], v[13], v[14], v[15];
+  if (!beam::IsTransformationMatrix(T_World_GtCloud)) {
     throw std::runtime_error{
         "T_World_GtCloud is not a valid transformation matrix"};
   }
@@ -62,15 +64,15 @@ void ScanPoseGtGeneration::LoadGtCloud() {
 void ScanPoseGtGeneration::LoadTrajectory() {
   beam_mapping::Poses poses;
   BEAM_INFO("Loading initial trajectory: {}", inputs_.initial_trajectory);
-  if(!poses.LoadFromFile(inputs_.initial_trajectory){
-    throw std::invalid_argument{"Invalid pose file"};  
+  if (!poses.LoadFromFile(inputs_.initial_trajectory)) {
+    throw std::invalid_argument{"Invalid pose file"};
   }
-  
+
   moving_frame_id_ = poses.GetMovingFrame();
   world_frame_id_ = poses.GetFixedFrame();
-  
+
   for (size_t k = 0; k < poses.GetTimeStamps().size(); k++) {
-    Eigen::Affine3d T_WORLD_MOVINGFRAME(slam_poses_.GetPoses()[k]);
+    Eigen::Affine3d T_WORLD_MOVINGFRAME(poses.GetPoses()[k]);
     trajectory_.AddTransform(T_WORLD_MOVINGFRAME, world_frame_id_,
                              moving_frame_id_, poses.GetTimeStamps()[k]);
   }
@@ -78,8 +80,8 @@ void ScanPoseGtGeneration::LoadTrajectory() {
 
 void ScanPoseGtGeneration::RegisterScans() {
   rosbag::Bag bag;
-  BEAM_INFO("Opening bag: {}", input_.bag_file);
-  bag.open(input_.bag_file, rosbag::bagmode::Read);
+  BEAM_INFO("Opening bag: {}", inputs_.bag);
+  bag.open(inputs_.bag, rosbag::bagmode::Read);
   if (!bag.isOpen()) { throw std::runtime_error{"unable to open ROS bag"}; }
 
   rosbag::View view(bag, rosbag::TopicQuery(inputs_.topic), ros::TIME_MIN,
@@ -87,10 +89,9 @@ void ScanPoseGtGeneration::RegisterScans() {
   int total_messages = view.size();
   BEAM_INFO("Read a total of {} pointcloud messages", total_messages);
   int message_counter{0};
-  std::string output_message = "Loading scans for sensor No. ";
+  std::string output_message = "registering scans";
   for (auto iter = view.begin(); iter != view.end(); iter++) {
     message_counter++;
-    output_message += std::to_string(sensor_number + 1);
     beam::OutputPercentComplete(message_counter, total_messages,
                                 output_message);
     auto sensor_msg = iter->instantiate<sensor_msgs::PointCloud2>();
@@ -99,7 +100,7 @@ void ScanPoseGtGeneration::RegisterScans() {
         std::make_shared<pcl::PCLPointCloud2>();
     PointCloud cloud;
     beam::pcl_conversions::toPCL(*sensor_msg, *pcl_pc2_tmp);
-    pcl::fromPCLPointCloud2(*pcl_pc2_tmp, cloud_tmp);
+    pcl::fromPCLPointCloud2(*pcl_pc2_tmp, cloud);
     RegisterSingleScan(cloud, timestamp);
   }
 }

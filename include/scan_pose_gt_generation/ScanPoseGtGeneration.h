@@ -38,7 +38,7 @@ private:
   void LoadGtCloud();
   void LoadTrajectory();
   void RegisterScans();
-  void LoadTrajectory();
+  void RegisterSingleScan(const PointCloud& cloud, const ros::Time& timestamp);
 
   Inputs inputs_;
   Params params_;
