@@ -11,8 +11,8 @@ The goal of this repo is to create a tool for automatically generating ground tr
 (4) Extrinsics: estrinsic calibrations json file. Only needed if the scan is not in the same frame as the poses. See example: extrinsics_example.json \
 
 ## Outputs
-(1) gt_trajectory.json : ground truth trajectory with a pose at each lidar scan time. The frames in these poses will be consistent with those in the initial trajectory.
-(2) summary.json: will contain important information such as which scans failed the registration thresholds, how many are valid vs invalid, etc.
+(1) gt_trajectory.json : ground truth trajectory with a pose at each lidar scan time. The frames in these poses will be consistent with those in the initial trajectory.\
+(2) summary.json: will contain important information such as which scans failed the registration thresholds, how many are valid vs invalid, etc. \
 
 ## Methodology
 
