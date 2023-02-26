@@ -14,10 +14,31 @@
 namespace scan_pose_gt_gen {
 
 void ScanPoseGtGeneration::run() {
+  LoadConfig();
   LoadExtrinsics();
   LoadGtCloud();
   LoadTrajectory();
   RegisterScans();
+}
+
+void ScanPoseGtGeneration::LoadConfig() {
+  BEAM_INFO("Loading config file: {}", inputs_.config);
+  nlohmann::json J;
+  if (!beam::ReadJson(inputs_.config, J)) {
+    throw std::runtime_error{"Invalid config json"};
+  }
+
+  if (!J.contains("map_max_size") || !J.contains("save_map") ||
+      !J.contains("scan_filters") || !J.contains("gt_cloud_filters")) {
+    throw std::runtime_error{
+        "missing one or more parameter in the config file"};
+  }
+
+  params_.map_max_size = J["map_max_size"].get<int>();
+  params_.save_map = J["save_map"].get<bool>();
+  scan_filters_ = beam_filtering::LoadFilterParamsVector(J["scan_filters"]);
+  gt_cloud_filters_ =
+      beam_filtering::LoadFilterParamsVector(J["gt_cloud_filters"]);
 }
 
 void ScanPoseGtGeneration::LoadExtrinsics() {
@@ -57,8 +78,11 @@ void ScanPoseGtGeneration::LoadGtCloud() {
         "T_World_GtCloud is not a valid transformation matrix"};
   }
   T_World_GtCloud_ = T_World_GtCloud;
-
+  PointCloud gt_cloud_in_world;
   pcl::transformPointCloud(gt_cloud_in, gt_cloud_in_world, T_World_GtCloud);
+
+  gt_cloud_in_world_ = beam_filtering::FilterPointCloud<pcl::PointXYZ>(
+      gt_cloud_in_world, gt_cloud_filters_);
 }
 
 void ScanPoseGtGeneration::LoadTrajectory() {
@@ -107,7 +131,8 @@ void ScanPoseGtGeneration::RegisterScans() {
 
 void ScanPoseGtGeneration::RegisterSingleScan(const PointCloud& cloud,
                                               const ros::Time& timestamp) {
-  //
+  PointCloud cloud_filtered =
+      beam_filtering::FilterPointCloud<pcl::PointXYZ>(cloud, scan_filters_);
 }
 
 } // namespace scan_pose_gt_gen

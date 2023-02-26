@@ -36,6 +36,9 @@ DEFINE_validator(extrinsics, &beam::gflags::ValidateJsonFileMustExist);
 DEFINE_string(topic, "",
               "topic name for the lidar data you want to generate GT for");
 DEFINE_validator(topic, &beam::gflags::ValidateCannotBeEmpty);
+DEFINE_string(config, "",
+              "full path to config file, example file found in config/config_example.json");
+DEFINE_validator(config, &beam::gflags::ValidateFileMustExist);
 
 int main(int argc, char* argv[]) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
@@ -48,6 +51,7 @@ int main(int argc, char* argv[]) {
   inputs.output_directory = FLAGS_output_directory;
   inputs.extrinsics = FLAGS_extrinsics;
   inputs.topic = FLAGS_topic;
+  inputs.config = FLAGS_config;
   scan_pose_gt_gen::ScanPoseGtGeneration gt_generator(inputs);
   gt_generator.run();
 
