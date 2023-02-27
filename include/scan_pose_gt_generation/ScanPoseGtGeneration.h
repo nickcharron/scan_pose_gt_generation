@@ -1,7 +1,6 @@
 #pragma once
 
 #include <beam_calibration/TfTree.h>
-#include <beam_mapping/Poses.h>
 #include <beam_filtering/Utils.h>
 #include <beam_mapping/Poses.h>
 #include <beam_mapping/Utils.h>
@@ -36,7 +35,7 @@ public:
     std::vector<int64_t> valid_scan_stamps; // timestamps in NS
     std::vector<std::string> saved_cloud_names;
     beam_mapping::Poses poses;
-  }
+  };
 
   ScanPoseGtGeneration() = delete;
 
@@ -57,18 +56,20 @@ private:
   void RegisterSingleScan(const PointCloud& cloud_in_lidar_frame,
                           const ros::Time& timestamp);
   Eigen::Matrix4d GetT_WorldEst_Lidar(const ros::Time& timestamp);
+  Eigen::Matrix4d
+      GetT_MovingLast_MovingCurrent(const ros::Time& timestamp_current);
   void SaveSuccessfulRegistration(const PointCloud& cloud_in_lidar_frame,
                                   const Eigen::Matrix4d& T_WORLD_LIDAR,
-                                  const ros::TIme& timestamp);
+                                  const ros::Time& timestamp);
   void SaveResults();
 
   Inputs inputs_;
   Params params_;
   Results results_;
   beam_calibration::TfTree trajectory_;
-  beam_calibration::TfTree extrinsics_;
   PointCloudPtr gt_cloud_in_world_;
   Eigen::Matrix4d T_World_GtCloud_;
+  Eigen::Matrix4d T_MOVING_LIDAR_;
   std::string world_frame_id_;
   std::string moving_frame_id_;
   std::string lidar_frame_id_;
@@ -79,6 +80,8 @@ private:
   PointCloud map_;
   int current_map_size_{0};
   std::string map_save_dir_;
+  ros::Time timestamp_last_;
+  Eigen::Matrix4d T_World_MovingLast_;
 };
 
 } // namespace scan_pose_gt_gen

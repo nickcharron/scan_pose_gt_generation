@@ -8,6 +8,7 @@
 #include <rosbag/bag.h>
 #include <rosbag/view.h>
 
+#include <beam_matching/IcpMatcher.h>
 #include <beam_utils/log.h>
 #include <beam_utils/math.h>
 
@@ -42,9 +43,9 @@ void ScanPoseGtGeneration::LoadConfig() {
   params_.rotation_threshold_deg = J["rotation_threshold_deg"].get<double>();
   params_.translation_threshold_m = J["translation_threshold_m"].get<double>();
 
-  if(params_.save_map){
-      map_save_dir_ = beam::CombinePaths(inputs_.output, "gt_maps");
-      boost::filesystem::create_directory(map_save_dir_);
+  if (params_.save_map) {
+    map_save_dir_ = beam::CombinePaths(inputs_.output_directory, "gt_maps");
+    boost::filesystem::create_directory(map_save_dir_);
   }
 
   scan_filters_ = beam_filtering::LoadFilterParamsVector(J["scan_filters"]);
@@ -53,7 +54,10 @@ void ScanPoseGtGeneration::LoadConfig() {
 }
 
 void ScanPoseGtGeneration::LoadExtrinsics() {
-  extrinsics_.LoadJSON(inputs_.extrinsics);
+  beam_calibration::TfTree extrinsics;
+  extrinsics.LoadJSON(inputs_.extrinsics);
+  T_MOVING_LIDAR_ =
+      extrinsics.GetTransformEigen(moving_frame_id_, lidar_frame_id_).matrix();
 }
 
 void ScanPoseGtGeneration::LoadGtCloud() {
@@ -143,44 +147,53 @@ void ScanPoseGtGeneration::RegisterScans() {
 
 void ScanPoseGtGeneration::RegisterSingleScan(
     const PointCloud& cloud_in_lidar_frame, const ros::Time& timestamp) {
-  using namespace beam_matching;
-
   // filter cloud and transform to estimated world frame
   PointCloud cloud_filtered_in_lidar_frame =
       beam_filtering::FilterPointCloud<pcl::PointXYZ>(cloud_in_lidar_frame,
                                                       scan_filters_);
   PointCloudPtr cloud_in_WorldEst = std::make_shared<PointCloud>();
-  Eigen::Matrix4d T_WorldEst_Lidar = GetT_WorldEst_Lidar(timestamp);
-  pcl::transformPointCloud(cloud_filtered, *cloud_in_WorldEst,
+
+  // if first scan, get estimated pose straight from poses. Otherwise, get only
+  // relative pose from poses
+  Eigen::Matrix4d T_WorldEst_Lidar;
+  if (current_map_size_ == 0 && results_.saved_cloud_names.empty()) {
+    T_WorldEst_Lidar = GetT_WorldEst_Lidar(timestamp);
+  } else {
+    T_WorldEst_Lidar = T_World_MovingLast_ *
+                       GetT_MovingLast_MovingCurrent(timestamp) *
+                       T_MOVING_LIDAR_;
+  }
+
+  pcl::transformPointCloud(cloud_filtered_in_lidar_frame, *cloud_in_WorldEst,
                            T_WorldEst_Lidar);
 
   // run ICP
-  IcpMatcherParams icp_params;
+  beam_matching::IcpMatcherParams icp_params;
   icp_params.max_corr = 0.1;
   icp_params.max_iter = 0.1;
   icp_params.fit_eps = 1e-3;
 
-  IcpMatcher icp_matcher(icp_params);
+  beam_matching::IcpMatcher icp_matcher(icp_params);
   icp_matcher.SetRef(gt_cloud_in_world_);
   icp_matcher.SetTarget(cloud_in_WorldEst);
   icp_matcher.Match();
-  Eigen::Matrix4d T_WorldEst_World = icp_matcher.GetResult();
+  Eigen::Matrix4d T_WorldEst_World = icp_matcher.GetResult().matrix();
 
   double trans = T_WorldEst_World.block(0, 3, 3, 1).norm();
   if (trans > params_.translation_threshold_m) {
-    invalid_scans.push_back(timestamp.toNSec());
-    invalid_scan_translations.push_back(trans);
-    invalid_scan_angles.push_back(0);
+    results_.invalid_scan_stamps.push_back(timestamp.toNSec());
+    results_.invalid_scan_translations.push_back(trans);
+    results_.invalid_scan_angles.push_back(0);
     return;
   }
 
   Eigen::Matrix3d R = T_WorldEst_World.block(0, 0, 3, 3);
-  Eigen::AxisAngled aa(R);
+  Eigen::AngleAxis<double> aa(R);
   double angle = aa.angle() * 180 / M_PI;
   if (angle > params_.rotation_threshold_deg) {
-    invalid_scans.push_back(timestamp.toNSec());
-    invalid_scan_translations.push_back(0);
-    invalid_scan_angles.push_back(angle);
+    results_.invalid_scan_stamps.push_back(timestamp.toNSec());
+    results_.invalid_scan_translations.push_back(0);
+    results_.invalid_scan_angles.push_back(angle);
     return;
   }
 
@@ -191,12 +204,30 @@ void ScanPoseGtGeneration::RegisterSingleScan(
 
 Eigen::Matrix4d
     ScanPoseGtGeneration::GetT_WorldEst_Lidar(const ros::Time& timestamp) {
-  // todo
+  Eigen::Matrix4d T_WORLD_MOVING =
+      trajectory_
+          .GetTransformEigen(world_frame_id_, moving_frame_id_, timestamp)
+          .matrix();
+  return T_WORLD_MOVING * T_MOVING_LIDAR_;
+}
+
+Eigen::Matrix4d ScanPoseGtGeneration::GetT_MovingLast_MovingCurrent(
+    const ros::Time& timestamp_current) {
+  Eigen::Matrix4d T_World_MovingCurrent =
+      trajectory_
+          .GetTransformEigen(world_frame_id_, moving_frame_id_,
+                             timestamp_current)
+          .matrix();
+  Eigen::Matrix4d T_MovingLast_World =
+      trajectory_
+          .GetTransformEigen(moving_frame_id_, world_frame_id_, timestamp_last_)
+          .matrix();
+  return T_MovingLast_World * T_World_MovingCurrent;
 }
 
 void ScanPoseGtGeneration::SaveSuccessfulRegistration(
     const PointCloud& cloud_in_lidar_frame,
-    const Eigen::Matrix4d& T_WORLD_LIDAR, const ros::TIme& timestamp) {
+    const Eigen::Matrix4d& T_WORLD_LIDAR, const ros::Time& timestamp) {
   PointCloud cloud_in_world;
   pcl::transformPointCloud(cloud_in_lidar_frame, cloud_in_world, T_WORLD_LIDAR);
   map_ += cloud_in_world;
@@ -204,7 +235,8 @@ void ScanPoseGtGeneration::SaveSuccessfulRegistration(
 
   if (current_map_size_ == params_.map_max_size) {
     std::string err;
-    std::string filename = "map_" + std::to_string(results_.saved_cloud_names.size() + 1) + ".pcd";
+    std::string filename =
+        "map_" + std::to_string(results_.saved_cloud_names.size() + 1) + ".pcd";
     std::string filepath = beam::CombinePaths(map_save_dir_, filename);
     if (beam::SavePointCloud<pcl::PointXYZ>(
             filename, map_, beam::PointCloudFileType::PCDBINARY, err)) {
@@ -213,14 +245,44 @@ void ScanPoseGtGeneration::SaveSuccessfulRegistration(
     }
     map_ = PointCloud();
     current_map_size_ = 0;
-    saved_cloud_names.push_back(filename);
+    results_.saved_cloud_names.push_back(filename);
   }
+
+  results_.valid_scan_stamps.push_back(timestamp.toNSec());
+
+  Eigen::Matrix4d T_WORLD_MOVING =
+      T_WORLD_LIDAR * beam::InvertTransform(T_MOVING_LIDAR_);
+
+  // update last successful measurements
+  T_World_MovingLast_ = T_WORLD_MOVING;
+  timestamp_last_ = timestamp;
+
+  // add to poses
+  results_.poses.AddSingleTimeStamp(timestamp);
+  results_.poses.AddSinglePose(T_WORLD_MOVING);
 }
 
 void ScanPoseGtGeneration::SaveResults() {
-  // todo
-  // save map_names.json
+  nlohmann::json J;
+  J["map_names"] = results_.saved_cloud_names;
+  J["invalid_scan_stamps"] = results_.invalid_scan_stamps;
+  J["invalid_scan_angles"] = results_.invalid_scan_angles;
+  J["invalid_scan_translations"] = results_.invalid_scan_translations;
+  J["valid_scan_stamps"] = results_.valid_scan_stamps;
+  J["num_total_scans"] =
+      results_.valid_scan_stamps.size() + results_.invalid_scan_stamps.size();
+  J["num_valid_scans"] = results_.valid_scan_stamps.size();
+  J["num_invalid_scans"] = results_.invalid_scan_stamps.size();
+
+  std::string filename =
+      beam::CombinePaths(inputs_.output_directory, "results_summary.json");
+  std::ofstream o(filename);
+  o << std::setw(4) << J << std::endl;
+
   // save poses.json
+  results_.poses.SetFixedFrame(world_frame_id_);
+  results_.poses.SetMovingFrame(moving_frame_id_);
+  results_.poses.WriteToJSON(inputs_.output_directory);
 }
 
 } // namespace scan_pose_gt_gen
