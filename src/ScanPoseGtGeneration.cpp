@@ -8,9 +8,9 @@
 #include <rosbag/bag.h>
 #include <rosbag/view.h>
 
-#include <beam_matching/IcpMatcher.h>
 #include <beam_utils/log.h>
 #include <beam_utils/math.h>
+#include <beam_utils/time.h>
 
 namespace scan_pose_gt_gen {
 
@@ -19,6 +19,7 @@ void ScanPoseGtGeneration::run() {
   LoadExtrinsics();
   LoadGtCloud();
   LoadTrajectory();
+  SetupRegistration();
   RegisterScans();
   SaveResults();
 }
@@ -118,6 +119,17 @@ void ScanPoseGtGeneration::LoadTrajectory() {
   }
 }
 
+void ScanPoseGtGeneration::SetupRegistration() {
+  BEAM_INFO("Setting up registration");
+  icp_.setInputTarget(gt_cloud_in_world_);
+  icp_.setMaxCorrespondenceDistance(params_.icp_params.max_corr_dist);
+  icp_.setMaximumIterations(params_.icp_params.max_iterations);
+  icp_.setTransformationEpsilon(params_.icp_params.transform_eps);
+  icp_.setEuclideanFitnessEpsilon(params_.icp_params.fitness_eps);
+  BEAM_INFO("Done setting up registration, elapsed time: {}s",
+            timer_.elapsed());
+}
+
 void ScanPoseGtGeneration::RegisterScans() {
   rosbag::Bag bag;
   BEAM_INFO("Opening bag: {}", inputs_.bag);
@@ -128,12 +140,8 @@ void ScanPoseGtGeneration::RegisterScans() {
                     ros::TIME_MAX, true);
   int total_messages = view.size();
   BEAM_INFO("Read a total of {} pointcloud messages", total_messages);
-  int message_counter{0};
-  std::string output_message = "registering scans";
   for (auto iter = view.begin(); iter != view.end(); iter++) {
-    message_counter++;
-    beam::OutputPercentComplete(message_counter, total_messages,
-                                output_message);
+    scan_counter_++;
     auto sensor_msg = iter->instantiate<sensor_msgs::PointCloud2>();
     ros::Time timestamp = sensor_msg->header.stamp;
     pcl::PCLPointCloud2::Ptr pcl_pc2_tmp =
@@ -168,18 +176,24 @@ void ScanPoseGtGeneration::RegisterSingleScan(
                            T_WorldEst_Lidar);
 
   // run ICP
-  beam_matching::IcpMatcherParams icp_params;
-  icp_params.max_corr = 0.1;
-  icp_params.max_iter = 0.1;
-  icp_params.fit_eps = 1e-3;
+  BEAM_INFO("Running registration for scan {}, timestamp: {} Ns", scan_counter_,
+            timestamp.toNSec());
+  timer_.restart();
+  PointCloud registered_cloud;
+  icp_.setInputSource(cloud_in_WorldEst);
+  icp_.align(registered_cloud);
+  Eigen::Matrix4d T_World_WorldEst =
+      icp_.getFinalTransformation().cast<double>();
+  BEAM_INFO("Registration time: {}s", timer_.elapsed());
 
-  beam_matching::IcpMatcher icp_matcher(icp_params);
-  icp_matcher.SetRef(gt_cloud_in_world_);
-  icp_matcher.SetTarget(cloud_in_WorldEst);
-  icp_matcher.Match();
-  Eigen::Matrix4d T_WorldEst_World = icp_matcher.GetResult().matrix();
+  if (!icp_.hasConverged()) {
+    results_.invalid_scan_stamps.push_back(timestamp.toNSec());
+    results_.invalid_scan_translations.push_back(0);
+    results_.invalid_scan_angles.push_back(0);
+    return;
+  }
 
-  double trans = T_WorldEst_World.block(0, 3, 3, 1).norm();
+  double trans = T_World_WorldEst.block(0, 3, 3, 1).norm();
   if (trans > params_.translation_threshold_m) {
     results_.invalid_scan_stamps.push_back(timestamp.toNSec());
     results_.invalid_scan_translations.push_back(trans);
@@ -187,7 +201,7 @@ void ScanPoseGtGeneration::RegisterSingleScan(
     return;
   }
 
-  Eigen::Matrix3d R = T_WorldEst_World.block(0, 0, 3, 3);
+  Eigen::Matrix3d R = T_World_WorldEst.block(0, 0, 3, 3);
   Eigen::AngleAxis<double> aa(R);
   double angle = aa.angle() * 180 / M_PI;
   if (angle > params_.rotation_threshold_deg) {
@@ -197,8 +211,7 @@ void ScanPoseGtGeneration::RegisterSingleScan(
     return;
   }
 
-  Eigen::Matrix4d T_WORLD_LIDAR =
-      beam::InvertTransform(T_WorldEst_World) * T_WorldEst_Lidar;
+  Eigen::Matrix4d T_WORLD_LIDAR = T_World_WorldEst * T_WorldEst_Lidar;
   SaveSuccessfulRegistration(cloud_in_lidar_frame, T_WORLD_LIDAR, timestamp);
 }
 
@@ -235,17 +248,17 @@ void ScanPoseGtGeneration::SaveSuccessfulRegistration(
 
   if (current_map_size_ == params_.map_max_size) {
     std::string err;
-    std::string filename =
+    std::string map_filename =
         "map_" + std::to_string(results_.saved_cloud_names.size() + 1) + ".pcd";
-    std::string filepath = beam::CombinePaths(map_save_dir_, filename);
+    std::string map_filepath = beam::CombinePaths(map_save_dir_, map_filename);
     if (beam::SavePointCloud<pcl::PointXYZ>(
-            filename, map_, beam::PointCloudFileType::PCDBINARY, err)) {
+            map_filepath, map_, beam::PointCloudFileType::PCDBINARY, err)) {
       BEAM_CRITICAL("unable to save map, reason: {}", err);
       throw std::runtime_error{"unable to save map"};
     }
     map_ = PointCloud();
     current_map_size_ = 0;
-    results_.saved_cloud_names.push_back(filename);
+    results_.saved_cloud_names.push_back(map_filename);
   }
 
   results_.valid_scan_stamps.push_back(timestamp.toNSec());
@@ -263,6 +276,18 @@ void ScanPoseGtGeneration::SaveSuccessfulRegistration(
 }
 
 void ScanPoseGtGeneration::SaveResults() {
+  // save map
+  std::string err;
+  std::string map_filename =
+      "map_" + std::to_string(results_.saved_cloud_names.size() + 1) + ".pcd";
+  std::string map_filepath = beam::CombinePaths(map_save_dir_, map_filename);
+  if (beam::SavePointCloud<pcl::PointXYZ>(
+          map_filepath, map_, beam::PointCloudFileType::PCDBINARY, err)) {
+    BEAM_CRITICAL("unable to save map, reason: {}", err);
+    throw std::runtime_error{"unable to save map"};
+  }
+  results_.saved_cloud_names.push_back(map_filename);
+
   nlohmann::json J;
   J["map_names"] = results_.saved_cloud_names;
   J["invalid_scan_stamps"] = results_.invalid_scan_stamps;

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <pcl/registration/icp.h>
+
 #include <beam_calibration/TfTree.h>
 #include <beam_filtering/Utils.h>
 #include <beam_mapping/Poses.h>
@@ -21,11 +23,19 @@ public:
     std::string config;
   };
 
+  struct IcpParams {
+    double max_corr_dist{0.1};
+    int max_iterations{40};
+    double transform_eps{1e-8};
+    double fitness_eps{1e-2};
+  };
+
   struct Params {
     bool save_map{true};
     int map_max_size{100};
     double rotation_threshold_deg{15};
     double translation_threshold_m{0.5};
+    IcpParams icp_params;
   };
 
   struct Results {
@@ -52,6 +62,7 @@ private:
   void LoadGtCloud();
   void LoadTrajectory();
   void SetInputFilters();
+  void SetupRegistration();
   void RegisterScans();
   void RegisterSingleScan(const PointCloud& cloud_in_lidar_frame,
                           const ros::Time& timestamp);
@@ -82,6 +93,11 @@ private:
   std::string map_save_dir_;
   ros::Time timestamp_last_;
   Eigen::Matrix4d T_World_MovingLast_;
+  beam::HighResolutionTimer timer_;
+  int scan_counter_{0};
+
+  // registration
+  pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp_;
 };
 
 } // namespace scan_pose_gt_gen
