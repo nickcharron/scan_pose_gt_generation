@@ -8,6 +8,7 @@
 #include <rosbag/bag.h>
 #include <rosbag/view.h>
 
+#include <beam_filtering/VoxelDownsample.h>
 #include <beam_utils/log.h>
 #include <beam_utils/math.h>
 #include <beam_utils/time.h>
@@ -93,6 +94,8 @@ void ScanPoseGtGeneration::LoadGtCloud() {
     throw std::runtime_error{
         "T_World_GtCloud is not a valid transformation matrix"};
   }
+  BEAM_INFO("loaded T_World_GtCloud: ");
+  std::cout << T_World_GtCloud << "\n";
   T_World_GtCloud_ = T_World_GtCloud;
   PointCloud gt_cloud_in_world;
   pcl::transformPointCloud(gt_cloud_in, gt_cloud_in_world, T_World_GtCloud);
@@ -100,6 +103,32 @@ void ScanPoseGtGeneration::LoadGtCloud() {
   gt_cloud_in_world_ = std::make_shared<PointCloud>(
       beam_filtering::FilterPointCloud<pcl::PointXYZ>(gt_cloud_in_world,
                                                       gt_cloud_filters_));
+
+  if (inputs_.visualize) {
+    beam_filtering::VoxelDownsample<pcl::PointXYZ> filter(
+        Eigen::Vector3f(0.05, 0.05, 0.05));
+    filter.SetInputCloud(gt_cloud_in_world_);
+    filter.Filter();
+    PointCloudPtr cloud_filtererd = std::make_shared<PointCloud>();
+    *cloud_filtererd = filter.GetFilteredCloud();
+    viewer_ = std::make_unique<pcl::visualization::PCLVisualizer>();
+    pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> col(
+        cloud_filtererd, 255, 255, 255);
+    viewer_->addPointCloud<pcl::PointXYZ>(cloud_filtererd, col, "GTMap");
+    viewer_->addCoordinateSystem(1.0);
+
+    std::function<void(const pcl::visualization::KeyboardEvent&)> keyboard_cb =
+        [this](const pcl::visualization::KeyboardEvent& event) {
+          keyboardEventOccurred(event);
+        };
+
+    viewer_->registerKeyboardCallback(keyboard_cb);
+  }
+}
+
+void ScanPoseGtGeneration::keyboardEventOccurred(
+    const pcl::visualization::KeyboardEvent& event) {
+  if (event.getKeySym() == "n" && event.keyDown()) { next_scan_ = true; }
 }
 
 void ScanPoseGtGeneration::LoadTrajectory() {
@@ -121,11 +150,12 @@ void ScanPoseGtGeneration::LoadTrajectory() {
 
 void ScanPoseGtGeneration::SetupRegistration() {
   BEAM_INFO("Setting up registration");
-  icp_.setInputTarget(gt_cloud_in_world_);
-  icp_.setMaxCorrespondenceDistance(params_.icp_params.max_corr_dist);
-  icp_.setMaximumIterations(params_.icp_params.max_iterations);
-  icp_.setTransformationEpsilon(params_.icp_params.transform_eps);
-  icp_.setEuclideanFitnessEpsilon(params_.icp_params.fitness_eps);
+  icp_ = std::make_unique<IcpType>();
+  icp_->setInputTarget(gt_cloud_in_world_);
+  icp_->setMaxCorrespondenceDistance(params_.icp_params.max_corr_dist);
+  icp_->setMaximumIterations(params_.icp_params.max_iterations);
+  icp_->setTransformationEpsilon(params_.icp_params.transform_eps);
+  icp_->setEuclideanFitnessEpsilon(params_.icp_params.fitness_eps);
   BEAM_INFO("Done setting up registration, elapsed time: {}s",
             timer_.elapsed());
 }
@@ -180,38 +210,40 @@ void ScanPoseGtGeneration::RegisterSingleScan(
             timestamp.toNSec());
   timer_.restart();
   PointCloud registered_cloud;
-  icp_.setInputSource(cloud_in_WorldEst);
-  icp_.align(registered_cloud);
+  icp_->setInputSource(cloud_in_WorldEst);
+  icp_->align(registered_cloud);
   Eigen::Matrix4d T_World_WorldEst =
-      icp_.getFinalTransformation().cast<double>();
+      icp_->getFinalTransformation().cast<double>();
   BEAM_INFO("Registration time: {}s", timer_.elapsed());
 
-  if (!icp_.hasConverged()) {
+  bool failed_registration{false};
+  if (!icp_->hasConverged()) {
     results_.invalid_scan_stamps.push_back(timestamp.toNSec());
     results_.invalid_scan_translations.push_back(0);
     results_.invalid_scan_angles.push_back(0);
-    return;
+    failed_registration = true;
+  } else {
+    double trans = T_World_WorldEst.block(0, 3, 3, 1).norm();
+    Eigen::Matrix3d R = T_World_WorldEst.block(0, 0, 3, 3);
+    Eigen::AngleAxis<double> aa(R);
+    double angle = aa.angle() * 180 / M_PI;
+    if (trans > params_.translation_threshold_m ||
+        angle > params_.rotation_threshold_deg) {
+      results_.invalid_scan_stamps.push_back(timestamp.toNSec());
+      results_.invalid_scan_translations.push_back(trans);
+      results_.invalid_scan_angles.push_back(angle);
+      failed_registration = true;
+    }
   }
 
-  double trans = T_World_WorldEst.block(0, 3, 3, 1).norm();
-  if (trans > params_.translation_threshold_m) {
-    results_.invalid_scan_stamps.push_back(timestamp.toNSec());
-    results_.invalid_scan_translations.push_back(trans);
-    results_.invalid_scan_angles.push_back(0);
-    return;
-  }
-
-  Eigen::Matrix3d R = T_World_WorldEst.block(0, 0, 3, 3);
-  Eigen::AngleAxis<double> aa(R);
-  double angle = aa.angle() * 180 / M_PI;
-  if (angle > params_.rotation_threshold_deg) {
-    results_.invalid_scan_stamps.push_back(timestamp.toNSec());
-    results_.invalid_scan_translations.push_back(0);
-    results_.invalid_scan_angles.push_back(angle);
+  if (failed_registration) {
+    DisplayResults(cloud_in_lidar_frame, Eigen::Matrix4d(), T_WorldEst_Lidar,
+                   false);
     return;
   }
 
   Eigen::Matrix4d T_WORLD_LIDAR = T_World_WorldEst * T_WorldEst_Lidar;
+  DisplayResults(cloud_in_lidar_frame, T_WORLD_LIDAR, T_WorldEst_Lidar, true);
   SaveSuccessfulRegistration(cloud_in_lidar_frame, T_WORLD_LIDAR, timestamp);
 }
 
@@ -251,6 +283,7 @@ void ScanPoseGtGeneration::SaveSuccessfulRegistration(
     std::string map_filename =
         "map_" + std::to_string(results_.saved_cloud_names.size() + 1) + ".pcd";
     std::string map_filepath = beam::CombinePaths(map_save_dir_, map_filename);
+    BEAM_INFO("saving map to: {}", map_filepath);
     if (beam::SavePointCloud<pcl::PointXYZ>(
             map_filepath, map_, beam::PointCloudFileType::PCDBINARY, err)) {
       BEAM_CRITICAL("unable to save map, reason: {}", err);
@@ -281,6 +314,7 @@ void ScanPoseGtGeneration::SaveResults() {
   std::string map_filename =
       "map_" + std::to_string(results_.saved_cloud_names.size() + 1) + ".pcd";
   std::string map_filepath = beam::CombinePaths(map_save_dir_, map_filename);
+  BEAM_INFO("saving map to: {}", map_filepath);
   if (beam::SavePointCloud<pcl::PointXYZ>(
           map_filepath, map_, beam::PointCloudFileType::PCDBINARY, err)) {
     BEAM_CRITICAL("unable to save map, reason: {}", err);
@@ -308,6 +342,33 @@ void ScanPoseGtGeneration::SaveResults() {
   results_.poses.SetFixedFrame(world_frame_id_);
   results_.poses.SetMovingFrame(moving_frame_id_);
   results_.poses.WriteToJSON(inputs_.output_directory);
+}
+
+void ScanPoseGtGeneration::DisplayResults(
+    const PointCloud& cloud_in_lidar, const Eigen::Matrix4d& T_WorldOpt_Lidar,
+    const Eigen::Matrix4d& T_WorldEst_Lidar, bool successful) {
+  if (!inputs_.visualize) { return; }
+
+  viewer_->removePointCloud("ScanAligned");
+  viewer_->removePointCloud("ScanInitial");
+
+  PointCloudPtr cloud_initial = std::make_shared<PointCloud>();
+  pcl::transformPointCloud(cloud_in_lidar, *cloud_initial, T_WorldEst_Lidar);
+  pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> init_col(
+      cloud_initial, 255, 0, 0);
+  viewer_->addPointCloud<pcl::PointXYZ>(cloud_initial, init_col, "ScanInitial");
+
+  if (successful) {
+    PointCloudPtr cloud_aligned = std::make_shared<PointCloud>();
+    pcl::transformPointCloud(cloud_in_lidar, *cloud_aligned, T_WorldOpt_Lidar);
+    pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> fin_col(
+        cloud_aligned, 0, 255, 0);
+    viewer_->addPointCloud<pcl::PointXYZ>(cloud_aligned, fin_col,
+                                          "ScanAligned");
+  }
+
+  while (!viewer_->wasStopped() && !next_scan_) { viewer_->spinOnce(); }
+  next_scan_ = false;
 }
 
 } // namespace scan_pose_gt_gen

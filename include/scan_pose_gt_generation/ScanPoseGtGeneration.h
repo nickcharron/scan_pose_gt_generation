@@ -1,6 +1,7 @@
 #pragma once
 
 #include <pcl/registration/icp.h>
+#include <pcl/visualization/pcl_visualizer.h>
 
 #include <beam_calibration/TfTree.h>
 #include <beam_filtering/Utils.h>
@@ -21,6 +22,7 @@ public:
     std::string extrinsics;
     std::string topic;
     std::string config;
+    bool visualize;
   };
 
   struct IcpParams {
@@ -74,6 +76,12 @@ private:
                                   const ros::Time& timestamp);
   void SaveResults();
 
+  void DisplayResults(const PointCloud& cloud_in_lidar,
+                      const Eigen::Matrix4d& T_WorldOpt_Lidar,
+                      const Eigen::Matrix4d& T_WorldEst_Lidar, bool successful);
+
+  void keyboardEventOccurred(const pcl::visualization::KeyboardEvent& event);
+
   Inputs inputs_;
   Params params_;
   Results results_;
@@ -95,9 +103,12 @@ private:
   Eigen::Matrix4d T_World_MovingLast_;
   beam::HighResolutionTimer timer_;
   int scan_counter_{0};
+  std::unique_ptr<pcl::visualization::PCLVisualizer> viewer_;
+  bool next_scan_{false};
 
   // registration
-  pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp_;
+  using IcpType = pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ>;
+  std::unique_ptr<IcpType> icp_;
 };
 
 } // namespace scan_pose_gt_gen

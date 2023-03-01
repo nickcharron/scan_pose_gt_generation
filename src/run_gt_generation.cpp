@@ -39,6 +39,7 @@ DEFINE_validator(topic, &beam::gflags::ValidateCannotBeEmpty);
 DEFINE_string(config, "",
               "full path to config file, example file found in config/config_example.json");
 DEFINE_validator(config, &beam::gflags::ValidateFileMustExist);
+DEFINE_bool(visualize, true, "display registration results for each scan");
 
 int main(int argc, char* argv[]) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
@@ -52,6 +53,7 @@ int main(int argc, char* argv[]) {
   inputs.extrinsics = FLAGS_extrinsics;
   inputs.topic = FLAGS_topic;
   inputs.config = FLAGS_config;
+  inputs.visualize = FLAGS_visualize;
   scan_pose_gt_gen::ScanPoseGtGeneration gt_generator(inputs);
   gt_generator.run();
 
