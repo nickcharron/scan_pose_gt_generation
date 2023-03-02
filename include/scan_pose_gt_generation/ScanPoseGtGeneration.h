@@ -1,5 +1,7 @@
 #pragma once
 
+#define PCL_NO_PRECOMPILE
+
 #include <pcl/registration/icp.h>
 #include <pcl/visualization/pcl_visualizer.h>
 
@@ -67,17 +69,17 @@ private:
   void SetInputFilters();
   void SetupRegistration();
   void RegisterScans();
-  void RegisterSingleScan(const PointCloud& cloud_in_lidar_frame,
+  void RegisterSingleScan(const PointCloudIRT& cloud_in_lidar_frame,
                           const ros::Time& timestamp);
   Eigen::Matrix4d GetT_WorldEst_Lidar(const ros::Time& timestamp);
   Eigen::Matrix4d
       GetT_MovingLast_MovingCurrent(const ros::Time& timestamp_current);
-  void SaveSuccessfulRegistration(const PointCloud& cloud_in_lidar_frame,
+  void SaveSuccessfulRegistration(const PointCloudIRT& cloud_in_lidar_frame,
                                   const Eigen::Matrix4d& T_WORLD_LIDAR,
                                   const ros::Time& timestamp);
   void SaveResults();
 
-  void DisplayResults(const PointCloud& cloud_in_lidar,
+  void DisplayResults(const PointCloudIRT& cloud_in_lidar,
                       const Eigen::Matrix4d& T_WorldOpt_Lidar,
                       const Eigen::Matrix4d& T_WorldEst_Lidar, bool successful,
                       const std::string& icp_results = "");
@@ -88,7 +90,7 @@ private:
   Params params_;
   Results results_;
   beam_calibration::TfTree trajectory_;
-  PointCloudPtr gt_cloud_in_world_;
+  PointCloudIRT::Ptr gt_cloud_in_world_;
   Eigen::Matrix4d T_World_GtCloud_;
   Eigen::Matrix4d T_MOVING_LIDAR_;
   std::string world_frame_id_;
@@ -98,7 +100,7 @@ private:
   std::vector<beam_filtering::FilterParamsType> scan_filters_;
   std::vector<beam_filtering::FilterParamsType> gt_cloud_filters_;
 
-  PointCloud map_;
+  PointCloudIRT map_;
   int current_map_size_{0};
   std::string map_save_dir_;
   ros::Time timestamp_last_;
@@ -109,7 +111,7 @@ private:
   bool next_scan_{false};
 
   // registration
-  using IcpType = pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ>;
+  using IcpType = pcl::IterativeClosestPoint<PointXYZIRT, PointXYZIRT>;
   std::unique_ptr<IcpType> icp_;
 };
 

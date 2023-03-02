@@ -65,7 +65,7 @@ void ScanPoseGtGeneration::LoadExtrinsics() {
 
 void ScanPoseGtGeneration::LoadGtCloud() {
   BEAM_INFO("Loading gt cloud: {}", inputs_.gt_cloud);
-  PointCloud gt_cloud_in;
+  PointCloudIRT gt_cloud_in;
   pcl::io::loadPCDFile(inputs_.gt_cloud, gt_cloud_in);
   if (gt_cloud_in.empty()) {
     BEAM_ERROR("empty input gt cloud.");
@@ -98,24 +98,24 @@ void ScanPoseGtGeneration::LoadGtCloud() {
   BEAM_INFO("loaded T_World_GtCloud: ");
   std::cout << T_World_GtCloud << "\n";
   T_World_GtCloud_ = T_World_GtCloud;
-  PointCloud gt_cloud_in_world;
+  PointCloudIRT gt_cloud_in_world;
   pcl::transformPointCloud(gt_cloud_in, gt_cloud_in_world, T_World_GtCloud);
 
-  gt_cloud_in_world_ = std::make_shared<PointCloud>(
-      beam_filtering::FilterPointCloud<pcl::PointXYZ>(gt_cloud_in_world,
-                                                      gt_cloud_filters_));
+  gt_cloud_in_world_ = std::make_shared<PointCloudIRT>(
+      beam_filtering::FilterPointCloud<PointXYZIRT>(gt_cloud_in_world,
+                                                    gt_cloud_filters_));
 
   if (inputs_.visualize) {
-    beam_filtering::VoxelDownsample<pcl::PointXYZ> filter(
+    beam_filtering::VoxelDownsample<PointXYZIRT> filter(
         Eigen::Vector3f(0.05, 0.05, 0.05));
     filter.SetInputCloud(gt_cloud_in_world_);
     filter.Filter();
-    PointCloudPtr cloud_filtererd = std::make_shared<PointCloud>();
+    PointCloudIRT::Ptr cloud_filtererd = std::make_shared<PointCloudIRT>();
     *cloud_filtererd = filter.GetFilteredCloud();
     viewer_ = std::make_unique<pcl::visualization::PCLVisualizer>();
-    pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> col(
+    pcl::visualization::PointCloudColorHandlerCustom<PointXYZIRT> col(
         cloud_filtererd, 255, 255, 255);
-    viewer_->addPointCloud<pcl::PointXYZ>(cloud_filtererd, col, "GTMap");
+    viewer_->addPointCloud<PointXYZIRT>(cloud_filtererd, col, "GTMap");
     viewer_->addCoordinateSystem(1.0);
 
     std::function<void(const pcl::visualization::KeyboardEvent&)> keyboard_cb =
@@ -186,7 +186,7 @@ void ScanPoseGtGeneration::RegisterScans() {
     ros::Time timestamp = sensor_msg->header.stamp;
     pcl::PCLPointCloud2::Ptr pcl_pc2_tmp =
         std::make_shared<pcl::PCLPointCloud2>();
-    PointCloud cloud;
+    PointCloudIRT cloud;
     beam::pcl_conversions::toPCL(*sensor_msg, *pcl_pc2_tmp);
     pcl::fromPCLPointCloud2(*pcl_pc2_tmp, cloud);
     RegisterSingleScan(cloud, timestamp);
@@ -194,12 +194,12 @@ void ScanPoseGtGeneration::RegisterScans() {
 }
 
 void ScanPoseGtGeneration::RegisterSingleScan(
-    const PointCloud& cloud_in_lidar_frame, const ros::Time& timestamp) {
+    const PointCloudIRT& cloud_in_lidar_frame, const ros::Time& timestamp) {
   // filter cloud and transform to estimated world frame
-  PointCloud cloud_filtered_in_lidar_frame =
-      beam_filtering::FilterPointCloud<pcl::PointXYZ>(cloud_in_lidar_frame,
-                                                      scan_filters_);
-  PointCloudPtr cloud_in_WorldEst = std::make_shared<PointCloud>();
+  PointCloudIRT cloud_filtered_in_lidar_frame =
+      beam_filtering::FilterPointCloud<PointXYZIRT>(cloud_in_lidar_frame,
+                                                    scan_filters_);
+  PointCloudIRT::Ptr cloud_in_WorldEst = std::make_shared<PointCloudIRT>();
 
   // if first scan, get estimated pose straight from poses. Otherwise, get only
   // relative pose from poses
@@ -219,7 +219,7 @@ void ScanPoseGtGeneration::RegisterSingleScan(
   BEAM_INFO("Running registration for scan {}, timestamp: {} Ns", scan_counter_,
             timestamp.toNSec());
   timer_.restart();
-  PointCloud registered_cloud;
+  PointCloudIRT registered_cloud;
   icp_->setInputSource(cloud_in_WorldEst);
   icp_->align(registered_cloud);
   Eigen::Matrix4d T_World_WorldEst =
@@ -285,9 +285,9 @@ Eigen::Matrix4d ScanPoseGtGeneration::GetT_MovingLast_MovingCurrent(
 }
 
 void ScanPoseGtGeneration::SaveSuccessfulRegistration(
-    const PointCloud& cloud_in_lidar_frame,
+    const PointCloudIRT& cloud_in_lidar_frame,
     const Eigen::Matrix4d& T_WORLD_LIDAR, const ros::Time& timestamp) {
-  PointCloud cloud_in_world;
+  PointCloudIRT cloud_in_world;
   pcl::transformPointCloud(cloud_in_lidar_frame, cloud_in_world, T_WORLD_LIDAR);
   map_ += cloud_in_world;
   current_map_size_++;
@@ -298,12 +298,12 @@ void ScanPoseGtGeneration::SaveSuccessfulRegistration(
         "map_" + std::to_string(results_.saved_cloud_names.size() + 1) + ".pcd";
     std::string map_filepath = beam::CombinePaths(map_save_dir_, map_filename);
     BEAM_INFO("saving map to: {}", map_filepath);
-    if (beam::SavePointCloud<pcl::PointXYZ>(
+    if (beam::SavePointCloud<PointXYZIRT>(
             map_filepath, map_, beam::PointCloudFileType::PCDBINARY, err)) {
       BEAM_CRITICAL("unable to save map, reason: {}", err);
       throw std::runtime_error{"unable to save map"};
     }
-    map_ = PointCloud();
+    map_ = PointCloudIRT();
     current_map_size_ = 0;
     results_.saved_cloud_names.push_back(map_filename);
   }
@@ -329,7 +329,7 @@ void ScanPoseGtGeneration::SaveResults() {
       "map_" + std::to_string(results_.saved_cloud_names.size() + 1) + ".pcd";
   std::string map_filepath = beam::CombinePaths(map_save_dir_, map_filename);
   BEAM_INFO("saving map to: {}", map_filepath);
-  if (beam::SavePointCloud<pcl::PointXYZ>(
+  if (beam::SavePointCloud<PointXYZIRT>(
           map_filepath, map_, beam::PointCloudFileType::PCDBINARY, err)) {
     BEAM_CRITICAL("unable to save map, reason: {}", err);
     throw std::runtime_error{"unable to save map"};
@@ -359,7 +359,8 @@ void ScanPoseGtGeneration::SaveResults() {
 }
 
 void ScanPoseGtGeneration::DisplayResults(
-    const PointCloud& cloud_in_lidar, const Eigen::Matrix4d& T_WorldOpt_Lidar,
+    const PointCloudIRT& cloud_in_lidar,
+    const Eigen::Matrix4d& T_WorldOpt_Lidar,
     const Eigen::Matrix4d& T_WorldEst_Lidar, bool successful,
     const std::string& icp_results) {
   if (!inputs_.visualize) { return; }
@@ -367,23 +368,22 @@ void ScanPoseGtGeneration::DisplayResults(
   viewer_->removePointCloud("ScanAligned");
   viewer_->removePointCloud("ScanInitial");
 
-  PointCloudPtr cloud_initial = std::make_shared<PointCloud>();
+  PointCloudIRT::Ptr cloud_initial = std::make_shared<PointCloudIRT>();
   pcl::transformPointCloud(cloud_in_lidar, *cloud_initial, T_WorldEst_Lidar);
-  pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> init_col(
+  pcl::visualization::PointCloudColorHandlerCustom<PointXYZIRT> init_col(
       cloud_initial, 255, 0, 0);
-  viewer_->addPointCloud<pcl::PointXYZ>(cloud_initial, init_col, "ScanInitial");
+  viewer_->addPointCloud<PointXYZIRT>(cloud_initial, init_col, "ScanInitial");
   viewer_->setPointCloudRenderingProperties(
       pcl::visualization::PCL_VISUALIZER_POINT_SIZE, params_.point_size,
       "ScanInitial");
   if (successful) {
     std::cout << "Showing successful ICP results\n"
               << "Press 'n' to skip to next scan\n";
-    PointCloudPtr cloud_aligned = std::make_shared<PointCloud>();
+    PointCloudIRT::Ptr cloud_aligned = std::make_shared<PointCloudIRT>();
     pcl::transformPointCloud(cloud_in_lidar, *cloud_aligned, T_WorldOpt_Lidar);
-    pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> fin_col(
+    pcl::visualization::PointCloudColorHandlerCustom<PointXYZIRT> fin_col(
         cloud_aligned, 0, 255, 0);
-    viewer_->addPointCloud<pcl::PointXYZ>(cloud_aligned, fin_col,
-                                          "ScanAligned");
+    viewer_->addPointCloud<PointXYZIRT>(cloud_aligned, fin_col, "ScanAligned");
     viewer_->setPointCloudRenderingProperties(
         pcl::visualization::PCL_VISUALIZER_POINT_SIZE, params_.point_size,
         "ScanAligned");
