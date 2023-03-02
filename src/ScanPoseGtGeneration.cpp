@@ -17,7 +17,6 @@ namespace scan_pose_gt_gen {
 
 void ScanPoseGtGeneration::run() {
   LoadConfig();
-  LoadExtrinsics();
   LoadGtCloud();
   LoadTrajectory();
   SetupRegistration();
@@ -60,6 +59,8 @@ void ScanPoseGtGeneration::LoadExtrinsics() {
   extrinsics.LoadJSON(inputs_.extrinsics);
   T_MOVING_LIDAR_ =
       extrinsics.GetTransformEigen(moving_frame_id_, lidar_frame_id_).matrix();
+  BEAM_INFO("Extracted T_MOVING_LIDAR:");
+  std::cout << T_MOVING_LIDAR_ << "\n";
 }
 
 void ScanPoseGtGeneration::LoadGtCloud() {
@@ -170,6 +171,15 @@ void ScanPoseGtGeneration::RegisterScans() {
                     ros::TIME_MAX, true);
   int total_messages = view.size();
   BEAM_INFO("Read a total of {} pointcloud messages", total_messages);
+
+  // get lidar sensor frame from first message to calculate extrinsics
+  {
+    auto first_msg = view.begin()->instantiate<sensor_msgs::PointCloud2>();
+    lidar_frame_id_ = first_msg->header.frame_id;
+  }
+  LoadExtrinsics();
+
+  // iterate through bag and run registration
   for (auto iter = view.begin(); iter != view.end(); iter++) {
     scan_counter_++;
     auto sensor_msg = iter->instantiate<sensor_msgs::PointCloud2>();
@@ -217,10 +227,12 @@ void ScanPoseGtGeneration::RegisterSingleScan(
   BEAM_INFO("Registration time: {}s", timer_.elapsed());
 
   bool failed_registration{false};
+  std::string icp_results_str;
   if (!icp_->hasConverged()) {
     results_.invalid_scan_stamps.push_back(timestamp.toNSec());
     results_.invalid_scan_translations.push_back(0);
     results_.invalid_scan_angles.push_back(0);
+    icp_results_str = "No convergence";
     failed_registration = true;
   } else {
     double trans = T_World_WorldEst.block(0, 3, 3, 1).norm();
@@ -232,13 +244,15 @@ void ScanPoseGtGeneration::RegisterSingleScan(
       results_.invalid_scan_stamps.push_back(timestamp.toNSec());
       results_.invalid_scan_translations.push_back(trans);
       results_.invalid_scan_angles.push_back(angle);
+      icp_results_str = "Invalid result: t =  " + std::to_string(trans) +
+                        ", r = " + std::to_string(angle);
       failed_registration = true;
     }
   }
 
   if (failed_registration) {
     DisplayResults(cloud_in_lidar_frame, Eigen::Matrix4d(), T_WorldEst_Lidar,
-                   false);
+                   false, icp_results_str);
     return;
   }
 
@@ -346,7 +360,8 @@ void ScanPoseGtGeneration::SaveResults() {
 
 void ScanPoseGtGeneration::DisplayResults(
     const PointCloud& cloud_in_lidar, const Eigen::Matrix4d& T_WorldOpt_Lidar,
-    const Eigen::Matrix4d& T_WorldEst_Lidar, bool successful) {
+    const Eigen::Matrix4d& T_WorldEst_Lidar, bool successful,
+    const std::string& icp_results) {
   if (!inputs_.visualize) { return; }
 
   viewer_->removePointCloud("ScanAligned");
@@ -357,14 +372,25 @@ void ScanPoseGtGeneration::DisplayResults(
   pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> init_col(
       cloud_initial, 255, 0, 0);
   viewer_->addPointCloud<pcl::PointXYZ>(cloud_initial, init_col, "ScanInitial");
-
+  viewer_->setPointCloudRenderingProperties(
+      pcl::visualization::PCL_VISUALIZER_POINT_SIZE, params_.point_size,
+      "ScanInitial");
   if (successful) {
+    std::cout << "Showing successful ICP results\n"
+              << "Press 'n' to skip to next scan\n";
     PointCloudPtr cloud_aligned = std::make_shared<PointCloud>();
     pcl::transformPointCloud(cloud_in_lidar, *cloud_aligned, T_WorldOpt_Lidar);
     pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> fin_col(
         cloud_aligned, 0, 255, 0);
     viewer_->addPointCloud<pcl::PointXYZ>(cloud_aligned, fin_col,
                                           "ScanAligned");
+    viewer_->setPointCloudRenderingProperties(
+        pcl::visualization::PCL_VISUALIZER_POINT_SIZE, params_.point_size,
+        "ScanAligned");
+  } else {
+    std::cout << "Showing unsuccessful ICP results.\n"
+              << "Reason for failure: " << icp_results << "\n"
+              << "Press 'n' to skip to next scan\n";
   }
 
   while (!viewer_->wasStopped() && !next_scan_) { viewer_->spinOnce(); }

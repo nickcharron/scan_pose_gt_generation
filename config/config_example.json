@@ -2,7 +2,7 @@
   "map_max_size": 100,
   "save_map": false,
   "rotation_threshold_deg": 15,
-  "translation_threshold_m": 0.5,
+  "translation_threshold_m": 1,
   "scan_filters": [
     {
       "filter_type": "CROPBOX",
@@ -33,6 +33,13 @@
       "remove_outside_points": true
     },
     {
+      "filter_type": "DROR",
+      "radius_multiplier": 2,
+      "azimuth_angle": 0.04,
+      "min_neighbors": 3,
+      "min_search_radius": 0.01
+    },
+    {
       "filter_type": "VOXEL",
       "cell_size": [
         0.05,
@@ -41,5 +48,14 @@
       ]
     }
   ],
-  "gt_cloud_filters": []
+  "gt_cloud_filters": [
+    {
+      "filter_type": "VOXEL",
+      "cell_size": [
+        0.02,
+        0.02,
+        0.02
+      ]
+    }
+  ]
 }

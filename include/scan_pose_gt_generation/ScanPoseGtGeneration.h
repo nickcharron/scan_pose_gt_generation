@@ -37,6 +37,7 @@ public:
     int map_max_size{100};
     double rotation_threshold_deg{15};
     double translation_threshold_m{0.5};
+    int point_size{3};
     IcpParams icp_params;
   };
 
@@ -78,7 +79,8 @@ private:
 
   void DisplayResults(const PointCloud& cloud_in_lidar,
                       const Eigen::Matrix4d& T_WorldOpt_Lidar,
-                      const Eigen::Matrix4d& T_WorldEst_Lidar, bool successful);
+                      const Eigen::Matrix4d& T_WorldEst_Lidar, bool successful,
+                      const std::string& icp_results = "");
 
   void keyboardEventOccurred(const pcl::visualization::KeyboardEvent& event);
 
