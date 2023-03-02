@@ -40,6 +40,7 @@ public:
     double rotation_threshold_deg{15};
     double translation_threshold_m{0.5};
     int point_size{3};
+    bool extract_loam_points{true};
     IcpParams icp_params;
   };
 
@@ -72,13 +73,14 @@ private:
   void RegisterSingleScan(const PointCloudIRT& cloud_in_lidar_frame,
                           const ros::Time& timestamp);
   Eigen::Matrix4d GetT_WorldEst_Lidar(const ros::Time& timestamp);
-  Eigen::Matrix4d
-      GetT_MovingLast_MovingCurrent(const ros::Time& timestamp_current);
+  bool GetT_MovingLast_MovingCurrent(
+    const ros::Time& timestamp_current,
+    Eigen::Matrix4d& T_MovingLast_MovingCurrent);
   void SaveSuccessfulRegistration(const PointCloudIRT& cloud_in_lidar_frame,
                                   const Eigen::Matrix4d& T_WORLD_LIDAR,
                                   const ros::Time& timestamp);
   void SaveResults();
-
+  PointCloudIRT ExtractStrongLoamPoints(const PointCloudIRT& cloud_in);
   void DisplayResults(const PointCloudIRT& cloud_in_lidar,
                       const Eigen::Matrix4d& T_WorldOpt_Lidar,
                       const Eigen::Matrix4d& T_WorldEst_Lidar, bool successful,
@@ -109,6 +111,7 @@ private:
   int scan_counter_{0};
   std::unique_ptr<pcl::visualization::PCLVisualizer> viewer_;
   bool next_scan_{false};
+  bool is_first_scan_{true};
 
   // registration
   using IcpType = pcl::IterativeClosestPoint<PointXYZIRT, PointXYZIRT>;

@@ -9,6 +9,7 @@
 #include <rosbag/view.h>
 
 #include <beam_filtering/VoxelDownsample.h>
+#include <beam_matching/loam/LoamFeatureExtractor.h>
 #include <beam_utils/log.h>
 #include <beam_utils/math.h>
 #include <beam_utils/time.h>
@@ -34,7 +35,8 @@ void ScanPoseGtGeneration::LoadConfig() {
   if (!J.contains("map_max_size") || !J.contains("save_map") ||
       !J.contains("rotation_threshold_deg") ||
       !J.contains("translation_threshold_m") || !J.contains("scan_filters") ||
-      !J.contains("gt_cloud_filters")) {
+      !J.contains("gt_cloud_filters") || !J.contains("point_size") ||
+      !J.contains("extract_loam_points")) {
     throw std::runtime_error{
         "missing one or more parameter in the config file"};
   }
@@ -43,6 +45,8 @@ void ScanPoseGtGeneration::LoadConfig() {
   params_.save_map = J["save_map"].get<bool>();
   params_.rotation_threshold_deg = J["rotation_threshold_deg"].get<double>();
   params_.translation_threshold_m = J["translation_threshold_m"].get<double>();
+  params_.point_size = J["point_size"].get<int>();
+  params_.extract_loam_points = J["extract_loam_points"].get<bool>();
 
   if (params_.save_map) {
     map_save_dir_ = beam::CombinePaths(inputs_.output_directory, "gt_maps");
@@ -195,21 +199,28 @@ void ScanPoseGtGeneration::RegisterScans() {
 
 void ScanPoseGtGeneration::RegisterSingleScan(
     const PointCloudIRT& cloud_in_lidar_frame, const ros::Time& timestamp) {
+  PointCloudIRT cloud2_in_lidar_frame =
+      ExtractStrongLoamPoints(cloud_in_lidar_frame);
+
   // filter cloud and transform to estimated world frame
   PointCloudIRT cloud_filtered_in_lidar_frame =
-      beam_filtering::FilterPointCloud<PointXYZIRT>(cloud_in_lidar_frame,
+      beam_filtering::FilterPointCloud<PointXYZIRT>(cloud2_in_lidar_frame,
                                                     scan_filters_);
   PointCloudIRT::Ptr cloud_in_WorldEst = std::make_shared<PointCloudIRT>();
 
   // if first scan, get estimated pose straight from poses. Otherwise, get only
   // relative pose from poses
   Eigen::Matrix4d T_WorldEst_Lidar;
-  if (current_map_size_ == 0 && results_.saved_cloud_names.empty()) {
+  if (is_first_scan_) {
     T_WorldEst_Lidar = GetT_WorldEst_Lidar(timestamp);
+    is_first_scan_ = false;
   } else {
-    T_WorldEst_Lidar = T_World_MovingLast_ *
-                       GetT_MovingLast_MovingCurrent(timestamp) *
-                       T_MOVING_LIDAR_;
+    Eigen::Matrix4d T_MovingLast_MovingCurrent;
+    if (!GetT_MovingLast_MovingCurrent(timestamp, T_MovingLast_MovingCurrent)) {
+      return;
+    }
+    T_WorldEst_Lidar =
+        T_World_MovingLast_ * T_MovingLast_MovingCurrent * T_MOVING_LIDAR_;
   }
 
   pcl::transformPointCloud(cloud_filtered_in_lidar_frame, *cloud_in_WorldEst,
@@ -251,14 +262,29 @@ void ScanPoseGtGeneration::RegisterSingleScan(
   }
 
   if (failed_registration) {
-    DisplayResults(cloud_in_lidar_frame, Eigen::Matrix4d(), T_WorldEst_Lidar,
+    DisplayResults(cloud2_in_lidar_frame, Eigen::Matrix4d(), T_WorldEst_Lidar,
                    false, icp_results_str);
     return;
   }
 
   Eigen::Matrix4d T_WORLD_LIDAR = T_World_WorldEst * T_WorldEst_Lidar;
-  DisplayResults(cloud_in_lidar_frame, T_WORLD_LIDAR, T_WorldEst_Lidar, true);
+  DisplayResults(cloud2_in_lidar_frame, T_WORLD_LIDAR, T_WorldEst_Lidar, true);
   SaveSuccessfulRegistration(cloud_in_lidar_frame, T_WORLD_LIDAR, timestamp);
+}
+
+PointCloudIRT ScanPoseGtGeneration::ExtractStrongLoamPoints(
+    const PointCloudIRT& cloud_in) {
+  if (!params_.extract_loam_points) { return cloud_in; }
+  beam_matching::LoamParamsPtr params =
+      std::make_shared<beam_matching::LoamParams>();
+  beam_matching::LoamFeatureExtractor extractor(params);
+  beam_matching::LoamPointCloud loam_cloud =
+      extractor.ExtractFeatures(cloud_in);
+  loam_cloud.edges.weak.Clear();
+  loam_cloud.surfaces.weak.Clear();
+  PointCloudIRT cloud_out;
+  pcl::copyPointCloud(loam_cloud.GetCombinedCloud(), cloud_out);
+  return cloud_out;
 }
 
 Eigen::Matrix4d
@@ -270,23 +296,30 @@ Eigen::Matrix4d
   return T_WORLD_MOVING * T_MOVING_LIDAR_;
 }
 
-Eigen::Matrix4d ScanPoseGtGeneration::GetT_MovingLast_MovingCurrent(
-    const ros::Time& timestamp_current) {
-  Eigen::Matrix4d T_World_MovingCurrent =
-      trajectory_
-          .GetTransformEigen(world_frame_id_, moving_frame_id_,
-                             timestamp_current)
-          .matrix();
-  Eigen::Matrix4d T_MovingLast_World =
-      trajectory_
-          .GetTransformEigen(moving_frame_id_, world_frame_id_, timestamp_last_)
-          .matrix();
-  return T_MovingLast_World * T_World_MovingCurrent;
+bool ScanPoseGtGeneration::GetT_MovingLast_MovingCurrent(
+    const ros::Time& timestamp_current,
+    Eigen::Matrix4d& T_MovingLast_MovingCurrent) {
+  try {
+    Eigen::Matrix4d T_World_MovingCurrent =
+        trajectory_
+            .GetTransformEigen(world_frame_id_, moving_frame_id_,
+                               timestamp_current)
+            .matrix();
+    Eigen::Matrix4d T_MovingLast_World =
+        trajectory_
+            .GetTransformEigen(moving_frame_id_, world_frame_id_,
+                               timestamp_last_)
+            .matrix();
+
+    T_MovingLast_MovingCurrent = T_MovingLast_World * T_World_MovingCurrent;
+    return true;
+  } catch (...) { return false; }
 }
 
 void ScanPoseGtGeneration::SaveSuccessfulRegistration(
     const PointCloudIRT& cloud_in_lidar_frame,
     const Eigen::Matrix4d& T_WORLD_LIDAR, const ros::Time& timestamp) {
+  if (!params_.save_map) { return; }
   PointCloudIRT cloud_in_world;
   pcl::transformPointCloud(cloud_in_lidar_frame, cloud_in_world, T_WORLD_LIDAR);
   map_ += cloud_in_world;
@@ -298,7 +331,7 @@ void ScanPoseGtGeneration::SaveSuccessfulRegistration(
         "map_" + std::to_string(results_.saved_cloud_names.size() + 1) + ".pcd";
     std::string map_filepath = beam::CombinePaths(map_save_dir_, map_filename);
     BEAM_INFO("saving map to: {}", map_filepath);
-    if (beam::SavePointCloud<PointXYZIRT>(
+    if (!beam::SavePointCloud<PointXYZIRT>(
             map_filepath, map_, beam::PointCloudFileType::PCDBINARY, err)) {
       BEAM_CRITICAL("unable to save map, reason: {}", err);
       throw std::runtime_error{"unable to save map"};
