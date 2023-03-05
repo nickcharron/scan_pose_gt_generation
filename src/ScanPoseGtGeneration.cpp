@@ -148,6 +148,11 @@ void ScanPoseGtGeneration::LoadTrajectory() {
 
   for (size_t k = 0; k < poses.GetTimeStamps().size(); k++) {
     Eigen::Affine3d T_WORLD_MOVINGFRAME(poses.GetPoses()[k]);
+    if (!beam::IsTransformationMatrix(T_WORLD_MOVINGFRAME.matrix())) {
+      BEAM_ERROR("Invalid transformation matrix read from poses, skipping");
+      continue;
+    }
+
     trajectory_.AddTransform(T_WORLD_MOVINGFRAME, world_frame_id_,
                              moving_frame_id_, poses.GetTimeStamps()[k]);
   }
@@ -212,7 +217,7 @@ void ScanPoseGtGeneration::RegisterSingleScan(
   // relative pose from poses
   Eigen::Matrix4d T_WorldEst_Lidar;
   if (is_first_scan_) {
-    T_WorldEst_Lidar = GetT_WorldEst_Lidar(timestamp);
+    if (!GetT_WorldEst_Lidar(timestamp, T_WorldEst_Lidar)) { return; }
     is_first_scan_ = false;
   } else {
     Eigen::Matrix4d T_MovingLast_MovingCurrent;
@@ -287,13 +292,21 @@ PointCloudIRT ScanPoseGtGeneration::ExtractStrongLoamPoints(
   return cloud_out;
 }
 
-Eigen::Matrix4d
-    ScanPoseGtGeneration::GetT_WorldEst_Lidar(const ros::Time& timestamp) {
-  Eigen::Matrix4d T_WORLD_MOVING =
-      trajectory_
-          .GetTransformEigen(world_frame_id_, moving_frame_id_, timestamp)
-          .matrix();
-  return T_WORLD_MOVING * T_MOVING_LIDAR_;
+bool ScanPoseGtGeneration::GetT_WorldEst_Lidar(const ros::Time& timestamp,
+                                               Eigen::Matrix4d& T_WORLD_LIDAR) {
+  Eigen::Matrix4d T_WORLD_MOVING;
+  try {
+    T_WORLD_MOVING =
+        trajectory_
+            .GetTransformEigen(world_frame_id_, moving_frame_id_, timestamp)
+            .matrix();
+  } catch (...) {
+    BEAM_WARN("skipping scan");
+    return false;
+  }
+
+  T_WORLD_LIDAR = T_WORLD_MOVING * T_MOVING_LIDAR_;
+  return true;
 }
 
 bool ScanPoseGtGeneration::GetT_MovingLast_MovingCurrent(
@@ -326,16 +339,17 @@ void ScanPoseGtGeneration::SaveSuccessfulRegistration(
   current_map_size_++;
 
   if (current_map_size_ == params_.map_max_size) {
-    std::string err;
     std::string map_filename =
         "map_" + std::to_string(results_.saved_cloud_names.size() + 1) + ".pcd";
     std::string map_filepath = beam::CombinePaths(map_save_dir_, map_filename);
     BEAM_INFO("saving map to: {}", map_filepath);
+    std::string err;
     if (!beam::SavePointCloud<PointXYZIRT>(
             map_filepath, map_, beam::PointCloudFileType::PCDBINARY, err)) {
       BEAM_CRITICAL("unable to save map, reason: {}", err);
       throw std::runtime_error{"unable to save map"};
     }
+
     map_ = PointCloudIRT();
     current_map_size_ = 0;
     results_.saved_cloud_names.push_back(map_filename);
@@ -362,7 +376,7 @@ void ScanPoseGtGeneration::SaveResults() {
       "map_" + std::to_string(results_.saved_cloud_names.size() + 1) + ".pcd";
   std::string map_filepath = beam::CombinePaths(map_save_dir_, map_filename);
   BEAM_INFO("saving map to: {}", map_filepath);
-  if (beam::SavePointCloud<PointXYZIRT>(
+  if (!beam::SavePointCloud<PointXYZIRT>(
           map_filepath, map_, beam::PointCloudFileType::PCDBINARY, err)) {
     BEAM_CRITICAL("unable to save map, reason: {}", err);
     throw std::runtime_error{"unable to save map"};
@@ -389,6 +403,18 @@ void ScanPoseGtGeneration::SaveResults() {
   results_.poses.SetFixedFrame(world_frame_id_);
   results_.poses.SetMovingFrame(moving_frame_id_);
   results_.poses.WriteToJSON(inputs_.output_directory);
+
+  // copy over files to output
+  std::string output_config = beam::CombinePaths(inputs_.output_directory, "config_copy.json");
+  BEAM_INFO("copying config file to: {}", output_config);
+  boost::filesystem::copy_file(inputs_.config, output_config);
+  std::string output_gt_cloud = beam::CombinePaths(inputs_.output_directory, "gt_cloud_copy.pcd");
+  BEAM_INFO("copying gt cloud to: {}", output_gt_cloud);
+  boost::filesystem::copy_file(inputs_.gt_cloud, output_gt_cloud);
+  std::string output_gt_cloud_pose = beam::CombinePaths(inputs_.output_directory, "gt_cloud_pose_copy.json");
+  BEAM_INFO("copying gt cloud pose file to: {}", output_gt_cloud_pose);
+  boost::filesystem::copy_file(inputs_.gt_cloud_pose, output_gt_cloud_pose);
+  
 }
 
 void ScanPoseGtGeneration::DisplayResults(

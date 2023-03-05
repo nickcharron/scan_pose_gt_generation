@@ -28,7 +28,7 @@ public:
   };
 
   struct IcpParams {
-    double max_corr_dist{0.1};
+    double max_corr_dist{0.4};
     int max_iterations{40};
     double transform_eps{1e-8};
     double fitness_eps{1e-2};
@@ -72,10 +72,11 @@ private:
   void RegisterScans();
   void RegisterSingleScan(const PointCloudIRT& cloud_in_lidar_frame,
                           const ros::Time& timestamp);
-  Eigen::Matrix4d GetT_WorldEst_Lidar(const ros::Time& timestamp);
+  bool GetT_WorldEst_Lidar(const ros::Time& timestamp,
+                           Eigen::Matrix4d& T_WORLD_LIDAR);
   bool GetT_MovingLast_MovingCurrent(
-    const ros::Time& timestamp_current,
-    Eigen::Matrix4d& T_MovingLast_MovingCurrent);
+      const ros::Time& timestamp_current,
+      Eigen::Matrix4d& T_MovingLast_MovingCurrent);
   void SaveSuccessfulRegistration(const PointCloudIRT& cloud_in_lidar_frame,
                                   const Eigen::Matrix4d& T_WORLD_LIDAR,
                                   const ros::Time& timestamp);

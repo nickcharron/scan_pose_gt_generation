@@ -1,5 +1,5 @@
 {
-  "map_max_size": 100,
+  "map_max_size": 50,
   "save_map": true,
   "rotation_threshold_deg": 15,
   "translation_threshold_m": 1,
@@ -23,14 +23,14 @@
     {
       "filter_type": "CROPBOX",
       "min": [
-        -8,
-        -8,
-        -8
+        -15,
+        -15,
+        -15
       ],
       "max": [
-        8,
-        8,
-        8
+        15,
+        15,
+        15
       ],
       "remove_outside_points": true
     }

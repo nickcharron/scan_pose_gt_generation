@@ -46,3 +46,16 @@ target_link_libraries(${PROJECT_NAME}_run_gt_generation
   ${PROJECT_NAME}
   beam::utils
 )
+
+add_executable(${PROJECT_NAME}_results_visualizer
+  src/results_visualizer.cpp
+)
+
+target_include_directories(${PROJECT_NAME}_results_visualizer
+  PUBLIC
+)
+
+target_link_libraries(${PROJECT_NAME}_results_visualizer
+  ${PROJECT_NAME}
+  beam::utils
+)
