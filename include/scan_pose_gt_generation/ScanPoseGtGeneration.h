@@ -37,10 +37,11 @@ public:
   struct Params {
     bool save_map{true};
     int map_max_size{100};
-    double rotation_threshold_deg{15};
+    double rotation_threshold_deg{180};
     double translation_threshold_m{0.5};
     int point_size{3};
     bool extract_loam_points{true};
+    bool use_relative_init_pose{false};
     IcpParams icp_params;
   };
 

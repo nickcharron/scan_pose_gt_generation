@@ -36,7 +36,8 @@ void ScanPoseGtGeneration::LoadConfig() {
       !J.contains("rotation_threshold_deg") ||
       !J.contains("translation_threshold_m") || !J.contains("scan_filters") ||
       !J.contains("gt_cloud_filters") || !J.contains("point_size") ||
-      !J.contains("extract_loam_points")) {
+      !J.contains("extract_loam_points") ||
+      !J.contains("use_relative_init_pose")) {
     throw std::runtime_error{
         "missing one or more parameter in the config file"};
   }
@@ -47,6 +48,7 @@ void ScanPoseGtGeneration::LoadConfig() {
   params_.translation_threshold_m = J["translation_threshold_m"].get<double>();
   params_.point_size = J["point_size"].get<int>();
   params_.extract_loam_points = J["extract_loam_points"].get<bool>();
+  params_.use_relative_init_pose = J["use_relative_init_pose"].get<bool>();
 
   if (params_.save_map) {
     map_save_dir_ = beam::CombinePaths(inputs_.output_directory, "gt_maps");
@@ -216,7 +218,7 @@ void ScanPoseGtGeneration::RegisterSingleScan(
   // if first scan, get estimated pose straight from poses. Otherwise, get only
   // relative pose from poses
   Eigen::Matrix4d T_WorldEst_Lidar;
-  if (is_first_scan_) {
+  if (is_first_scan_ || !params_.use_relative_init_pose) {
     if (!GetT_WorldEst_Lidar(timestamp, T_WorldEst_Lidar)) { return; }
     is_first_scan_ = false;
   } else {
@@ -405,16 +407,18 @@ void ScanPoseGtGeneration::SaveResults() {
   results_.poses.WriteToJSON(inputs_.output_directory);
 
   // copy over files to output
-  std::string output_config = beam::CombinePaths(inputs_.output_directory, "config_copy.json");
+  std::string output_config =
+      beam::CombinePaths(inputs_.output_directory, "config_copy.json");
   BEAM_INFO("copying config file to: {}", output_config);
   boost::filesystem::copy_file(inputs_.config, output_config);
-  std::string output_gt_cloud = beam::CombinePaths(inputs_.output_directory, "gt_cloud_copy.pcd");
+  std::string output_gt_cloud =
+      beam::CombinePaths(inputs_.output_directory, "gt_cloud_copy.pcd");
   BEAM_INFO("copying gt cloud to: {}", output_gt_cloud);
   boost::filesystem::copy_file(inputs_.gt_cloud, output_gt_cloud);
-  std::string output_gt_cloud_pose = beam::CombinePaths(inputs_.output_directory, "gt_cloud_pose_copy.json");
+  std::string output_gt_cloud_pose =
+      beam::CombinePaths(inputs_.output_directory, "gt_cloud_pose_copy.json");
   BEAM_INFO("copying gt cloud pose file to: {}", output_gt_cloud_pose);
   boost::filesystem::copy_file(inputs_.gt_cloud_pose, output_gt_cloud_pose);
-  
 }
 
 void ScanPoseGtGeneration::DisplayResults(
