@@ -33,22 +33,16 @@ void ScanPoseGtGeneration::LoadConfig() {
   }
 
   if (!J.contains("map_max_size") || !J.contains("save_map") ||
-      !J.contains("rotation_threshold_deg") ||
-      !J.contains("translation_threshold_m") || !J.contains("scan_filters") ||
-      !J.contains("gt_cloud_filters") || !J.contains("point_size") ||
-      !J.contains("extract_loam_points") ||
-      !J.contains("use_relative_init_pose")) {
+      !J.contains("scan_filters") || !J.contains("gt_cloud_filters") ||
+      !J.contains("point_size") || !J.contains("extract_loam_points")) {
     throw std::runtime_error{
         "missing one or more parameter in the config file"};
   }
 
   params_.map_max_size = J["map_max_size"].get<int>();
   params_.save_map = J["save_map"].get<bool>();
-  params_.rotation_threshold_deg = J["rotation_threshold_deg"].get<double>();
-  params_.translation_threshold_m = J["translation_threshold_m"].get<double>();
   params_.point_size = J["point_size"].get<int>();
   params_.extract_loam_points = J["extract_loam_points"].get<bool>();
-  params_.use_relative_init_pose = J["use_relative_init_pose"].get<bool>();
 
   if (params_.save_map) {
     map_save_dir_ = beam::CombinePaths(inputs_.output_directory, "gt_maps");
@@ -155,8 +149,8 @@ void ScanPoseGtGeneration::LoadTrajectory() {
       continue;
     }
 
-    trajectory_.AddTransform(T_WORLD_MOVINGFRAME, world_frame_id_,
-                             moving_frame_id_, poses.GetTimeStamps()[k]);
+    input_trajectory_.AddTransform(T_WORLD_MOVINGFRAME, world_frame_id_,
+                                   moving_frame_id_, poses.GetTimeStamps()[k]);
   }
 }
 
@@ -218,7 +212,7 @@ void ScanPoseGtGeneration::RegisterSingleScan(
   // if first scan, get estimated pose straight from poses. Otherwise, get only
   // relative pose from poses
   Eigen::Matrix4d T_WorldEst_Lidar;
-  if (is_first_scan_ || !params_.use_relative_init_pose) {
+  if (is_first_scan_) {
     if (!GetT_WorldEst_Lidar(timestamp, T_WorldEst_Lidar)) { return; }
     is_first_scan_ = false;
   } else {
@@ -244,33 +238,9 @@ void ScanPoseGtGeneration::RegisterSingleScan(
       icp_->getFinalTransformation().cast<double>();
   BEAM_INFO("Registration time: {}s", timer_.elapsed());
 
-  bool failed_registration{false};
-  std::string icp_results_str;
   if (!icp_->hasConverged()) {
-    results_.invalid_scan_stamps.push_back(timestamp.toNSec());
-    results_.invalid_scan_translations.push_back(0);
-    results_.invalid_scan_angles.push_back(0);
-    icp_results_str = "No convergence";
-    failed_registration = true;
-  } else {
-    double trans = T_World_WorldEst.block(0, 3, 3, 1).norm();
-    Eigen::Matrix3d R = T_World_WorldEst.block(0, 0, 3, 3);
-    Eigen::AngleAxis<double> aa(R);
-    double angle = aa.angle() * 180 / M_PI;
-    if (trans > params_.translation_threshold_m ||
-        angle > params_.rotation_threshold_deg) {
-      results_.invalid_scan_stamps.push_back(timestamp.toNSec());
-      results_.invalid_scan_translations.push_back(trans);
-      results_.invalid_scan_angles.push_back(angle);
-      icp_results_str = "Invalid result: t =  " + std::to_string(trans) +
-                        ", r = " + std::to_string(angle);
-      failed_registration = true;
-    }
-  }
-
-  if (failed_registration) {
     DisplayResults(cloud2_in_lidar_frame, Eigen::Matrix4d(), T_WorldEst_Lidar,
-                   false, icp_results_str);
+                   false);
     return;
   }
 
@@ -299,7 +269,7 @@ bool ScanPoseGtGeneration::GetT_WorldEst_Lidar(const ros::Time& timestamp,
   Eigen::Matrix4d T_WORLD_MOVING;
   try {
     T_WORLD_MOVING =
-        trajectory_
+        input_trajectory_
             .GetTransformEigen(world_frame_id_, moving_frame_id_, timestamp)
             .matrix();
   } catch (...) {
@@ -316,12 +286,12 @@ bool ScanPoseGtGeneration::GetT_MovingLast_MovingCurrent(
     Eigen::Matrix4d& T_MovingLast_MovingCurrent) {
   try {
     Eigen::Matrix4d T_World_MovingCurrent =
-        trajectory_
+        input_trajectory_
             .GetTransformEigen(world_frame_id_, moving_frame_id_,
                                timestamp_current)
             .matrix();
     Eigen::Matrix4d T_MovingLast_World =
-        trajectory_
+        input_trajectory_
             .GetTransformEigen(moving_frame_id_, world_frame_id_,
                                timestamp_last_)
             .matrix();
@@ -335,6 +305,13 @@ void ScanPoseGtGeneration::SaveSuccessfulRegistration(
     const PointCloudIRT& cloud_in_lidar_frame,
     const Eigen::Matrix4d& T_WORLD_LIDAR, const ros::Time& timestamp) {
   if (!params_.save_map) { return; }
+
+  // create first trajectory if it doesn't exist
+  if (trajectories_.empty()) {
+    Trajectory new_traj;
+    trajectories_.push_back(new_traj);
+  }
+
   PointCloudIRT cloud_in_world;
   pcl::transformPointCloud(cloud_in_lidar_frame, cloud_in_world, T_WORLD_LIDAR);
   map_ += cloud_in_world;
@@ -342,9 +319,10 @@ void ScanPoseGtGeneration::SaveSuccessfulRegistration(
 
   if (current_map_size_ == params_.map_max_size) {
     std::string map_filename =
-        "map_" + std::to_string(results_.saved_cloud_names.size() + 1) + ".pcd";
-    std::string map_filepath = beam::CombinePaths(map_save_dir_, map_filename);
-    BEAM_INFO("saving map to: {}", map_filepath);
+        "trajectory_" + std::to_string(trajectories_.size() + 1);
+    std::string map_filepath =
+        beam::CombinePaths(map_save_dir_, map_filename + ".pcd");
+    BEAM_INFO("saving map to: {}", map_filepath + ".pcd");
     std::string err;
     if (!beam::SavePointCloud<PointXYZIRT>(
             map_filepath, map_, beam::PointCloudFileType::PCDBINARY, err)) {
@@ -354,57 +332,73 @@ void ScanPoseGtGeneration::SaveSuccessfulRegistration(
 
     map_ = PointCloudIRT();
     current_map_size_ = 0;
-    results_.saved_cloud_names.push_back(map_filename);
-  }
+    trajectories_.rbegin()->map_filename = map_filename;
 
-  results_.valid_scan_stamps.push_back(timestamp.toNSec());
+    Trajectory new_traj;
+    trajectories_.push_back(new_traj);
+  }
 
   Eigen::Matrix4d T_WORLD_MOVING =
       T_WORLD_LIDAR * beam::InvertTransform(T_MOVING_LIDAR_);
 
+  beam::Pose new_pose;
+  new_pose.timestampInNs = timestamp.toNSec();
+  new_pose.T_FIXED_MOVING = T_WORLD_MOVING;
+  trajectories_.rbegin()->poses.push_back(new_pose);
+
   // update last successful measurements
   T_World_MovingLast_ = T_WORLD_MOVING;
   timestamp_last_ = timestamp;
-
-  // add to poses
-  results_.poses.AddSingleTimeStamp(timestamp);
-  results_.poses.AddSinglePose(T_WORLD_MOVING);
 }
 
 void ScanPoseGtGeneration::SaveResults() {
   // save map
   std::string err;
   std::string map_filename =
-      "map_" + std::to_string(results_.saved_cloud_names.size() + 1) + ".pcd";
-  std::string map_filepath = beam::CombinePaths(map_save_dir_, map_filename);
-  BEAM_INFO("saving map to: {}", map_filepath);
+      "trajectory_" + std::to_string(trajectories_.size() + 1);
+  std::string map_filepath =
+      beam::CombinePaths(map_save_dir_, map_filename + ".pcd");
+  BEAM_INFO("saving map to: {}", map_filepath + ".pcd");
   if (!beam::SavePointCloud<PointXYZIRT>(
           map_filepath, map_, beam::PointCloudFileType::PCDBINARY, err)) {
     BEAM_CRITICAL("unable to save map, reason: {}", err);
     throw std::runtime_error{"unable to save map"};
   }
-  results_.saved_cloud_names.push_back(map_filename);
+  trajectories_.rbegin()->map_filename = map_filename;
 
+  std::vector<std::string> trajectory_names;
+  beam_mapping::Poses poses_all;
+  for (const Trajectory& t : trajectories_) {
+    beam_mapping::Poses poses_current;
+    for (const beam::Pose& p : t.poses) {
+      ros::Time time_ros;
+      time_ros.fromNSec(p.timestampInNs);
+      poses_current.AddSingleTimeStamp(time_ros);
+      poses_current.AddSinglePose(p.T_FIXED_MOVING);
+      poses_all.AddSingleTimeStamp(time_ros);
+      poses_all.AddSinglePose(p.T_FIXED_MOVING);
+    }
+    poses_current.SetFixedFrame(world_frame_id_);
+    poses_current.SetMovingFrame(moving_frame_id_);
+    std::string poses_name = beam::CombinePaths(inputs_.output_directory,
+                                                t.map_filename + "_poses.json");
+    poses_current.WriteToJSON(poses_name);
+    trajectory_names.push_back(poses_name);
+  }
+
+  // save list of trajectories
   nlohmann::json J;
-  J["map_names"] = results_.saved_cloud_names;
-  J["invalid_scan_stamps"] = results_.invalid_scan_stamps;
-  J["invalid_scan_angles"] = results_.invalid_scan_angles;
-  J["invalid_scan_translations"] = results_.invalid_scan_translations;
-  J["valid_scan_stamps"] = results_.valid_scan_stamps;
-  J["num_total_scans"] =
-      results_.valid_scan_stamps.size() + results_.invalid_scan_stamps.size();
-  J["num_valid_scans"] = results_.valid_scan_stamps.size();
-  J["num_invalid_scans"] = results_.invalid_scan_stamps.size();
-
+  J["trajectories"] = trajectory_names;
   std::string filename =
-      beam::CombinePaths(inputs_.output_directory, "results_summary.json");
+      beam::CombinePaths(inputs_.output_directory, "trajectories_list.json");
   std::ofstream o(filename);
   o << std::setw(4) << J << std::endl;
 
-  // save poses.json
-  results_.poses.SetFixedFrame(world_frame_id_);
-  results_.poses.SetMovingFrame(moving_frame_id_);
-  results_.poses.WriteToJSON(inputs_.output_directory);
+  // save combined
+  poses_all.SetFixedFrame(world_frame_id_);
+  poses_all.SetMovingFrame(moving_frame_id_);
+  poses_all.WriteToJSON(
+      beam::CombinePaths(inputs_.output_directory, "poses_combined.json"));
 
   // copy over files to output
   std::string output_config =
@@ -424,8 +418,7 @@ void ScanPoseGtGeneration::SaveResults() {
 void ScanPoseGtGeneration::DisplayResults(
     const PointCloudIRT& cloud_in_lidar,
     const Eigen::Matrix4d& T_WorldOpt_Lidar,
-    const Eigen::Matrix4d& T_WorldEst_Lidar, bool successful,
-    const std::string& icp_results) {
+    const Eigen::Matrix4d& T_WorldEst_Lidar, bool successful) {
   if (!inputs_.visualize) { return; }
 
   viewer_->removePointCloud("ScanAligned");
@@ -452,7 +445,6 @@ void ScanPoseGtGeneration::DisplayResults(
         "ScanAligned");
   } else {
     std::cout << "Showing unsuccessful ICP results.\n"
-              << "Reason for failure: " << icp_results << "\n"
               << "Press 'n' to skip to next scan\n";
   }
 

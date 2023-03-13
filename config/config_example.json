@@ -1,10 +1,7 @@
 {
   "map_max_size": 50,
   "save_map": true,
-  "rotation_threshold_deg": 180,
-  "translation_threshold_m": 5,
   "extract_loam_points": true,
-  "use_relative_init_pose": false,
   "point_size": 4,
   "scan_filters": [
     {

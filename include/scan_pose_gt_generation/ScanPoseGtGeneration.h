@@ -10,6 +10,7 @@
 #include <beam_mapping/Poses.h>
 #include <beam_mapping/Utils.h>
 #include <beam_utils/pointclouds.h>
+#include <beam_utils/se3.h>
 
 namespace scan_pose_gt_gen {
 
@@ -37,21 +38,14 @@ public:
   struct Params {
     bool save_map{true};
     int map_max_size{100};
-    double rotation_threshold_deg{180};
-    double translation_threshold_m{0.5};
     int point_size{3};
     bool extract_loam_points{true};
-    bool use_relative_init_pose{false};
     IcpParams icp_params;
   };
 
-  struct Results {
-    std::vector<int64_t> invalid_scan_stamps; // timestamps in NS
-    std::vector<double> invalid_scan_angles;
-    std::vector<double> invalid_scan_translations;
-    std::vector<int64_t> valid_scan_stamps; // timestamps in NS
-    std::vector<std::string> saved_cloud_names;
-    beam_mapping::Poses poses;
+  struct Trajectory {
+    std::string map_filename;
+    std::vector<beam::Pose> poses;
   };
 
   ScanPoseGtGeneration() = delete;
@@ -85,15 +79,14 @@ private:
   PointCloudIRT ExtractStrongLoamPoints(const PointCloudIRT& cloud_in);
   void DisplayResults(const PointCloudIRT& cloud_in_lidar,
                       const Eigen::Matrix4d& T_WorldOpt_Lidar,
-                      const Eigen::Matrix4d& T_WorldEst_Lidar, bool successful,
-                      const std::string& icp_results = "");
+                      const Eigen::Matrix4d& T_WorldEst_Lidar, bool successful);
 
   void keyboardEventOccurred(const pcl::visualization::KeyboardEvent& event);
 
   Inputs inputs_;
   Params params_;
-  Results results_;
-  beam_calibration::TfTree trajectory_;
+  std::vector<Trajectory> trajectories_;
+  beam_calibration::TfTree input_trajectory_;
   PointCloudIRT::Ptr gt_cloud_in_world_;
   Eigen::Matrix4d T_World_GtCloud_;
   Eigen::Matrix4d T_MOVING_LIDAR_;
