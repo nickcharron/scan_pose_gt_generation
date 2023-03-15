@@ -1,8 +1,9 @@
 {
-  "map_max_size": 50,
   "save_map": true,
   "extract_loam_points": true,
   "point_size": 4,
+  "max_spline_length_m": 5,
+  "min_spline_measurements": 10,
   "scan_filters": [
     {
       "filter_type": "CROPBOX",

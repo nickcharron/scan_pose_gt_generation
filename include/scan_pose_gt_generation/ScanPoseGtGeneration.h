@@ -37,15 +37,43 @@ public:
 
   struct Params {
     bool save_map{true};
-    int map_max_size{100};
     int point_size{3};
     bool extract_loam_points{true};
+    double max_spline_length_m{5};
+    double min_spline_measurements{10};
     IcpParams icp_params;
   };
 
-  struct Trajectory {
+  class Trajectory {
+  public:
+    Trajectory() = default;
+
     std::string map_filename;
-    std::vector<beam::Pose> poses;
+
+    const std::vector<beam::Pose>& GetPoses() const { return poses_; }
+
+    int Size() const { return poses_.size(); }
+
+    double Length() const { return length_; }
+
+    void AddPose(int64_t timestampInNs, const Eigen::Matrix4d& T_FIXED_MOVING) {
+      beam::Pose pose;
+      pose.timestampInNs = timestampInNs;
+      pose.T_FIXED_MOVING = T_FIXED_MOVING;
+
+      if (poses_.size() > 1) {
+        Eigen::Vector3d t_last =
+            poses_.rbegin()->T_FIXED_MOVING.block(0, 3, 3, 1);
+        Eigen::Vector3d t_cur = T_FIXED_MOVING.block(0, 3, 3, 1);
+        length_ += (t_last - t_cur).norm();
+      }
+
+      poses_.push_back(pose);
+    }
+
+  private:
+    std::vector<beam::Pose> poses_;
+    double length_{0};
   };
 
   ScanPoseGtGeneration() = delete;
@@ -61,35 +89,41 @@ private:
   void LoadConfig();
   void LoadExtrinsics();
   void LoadGtCloud();
+  void keyboardEventOccurred(const pcl::visualization::KeyboardEvent& event);
   void LoadTrajectory();
-  void SetInputFilters();
   void SetupRegistration();
   void RegisterScans();
   void RegisterSingleScan(const PointCloudIRT& cloud_in_lidar_frame,
                           const ros::Time& timestamp);
-  bool GetT_WorldEst_Lidar(const ros::Time& timestamp,
-                           Eigen::Matrix4d& T_WORLD_LIDAR);
-  bool GetT_MovingLast_MovingCurrent(
-      const ros::Time& timestamp_current,
-      Eigen::Matrix4d& T_MovingLast_MovingCurrent);
-  void SaveSuccessfulRegistration(const PointCloudIRT& cloud_in_lidar_frame,
-                                  const Eigen::Matrix4d& T_WORLD_LIDAR,
-                                  const ros::Time& timestamp);
-  void SaveResults();
   PointCloudIRT ExtractStrongLoamPoints(const PointCloudIRT& cloud_in);
+  void UpdateT_INIT_SPLINE();
+  bool GetT_WORLDEST_MOVING(const ros::Time& timestamp,
+                            Eigen::Matrix4d& T_WORLD_MOVING);
+  bool GetT_WORLDESTINIT_MOVING(const ros::Time& timestamp,
+                                Eigen::Matrix4d& T_WORLD_MOVING);
+  void AddRegistrationResult(const PointCloudIRT& cloud_in_lidar_frame,
+                             const Eigen::Matrix4d& T_WORLD_LIDAR,
+                             const ros::Time& timestamp);
+  bool IsMapFull();
+  void FitSplineToTrajectory();
+  void SaveMaps();
+  void SaveMap(const Trajectory& trajectory, const std::string& name);
+  void SaveTrajectories(const std::vector<Trajectory>& trajectory,
+                        const std::string& name);
+  void SaveResults();
   void DisplayResults(const PointCloudIRT& cloud_in_lidar,
-                      const Eigen::Matrix4d& T_WorldOpt_Lidar,
-                      const Eigen::Matrix4d& T_WorldEst_Lidar, bool successful);
-
-  void keyboardEventOccurred(const pcl::visualization::KeyboardEvent& event);
+                      const Eigen::Matrix4d& T_WORLDOPT_LIDAR,
+                      const Eigen::Matrix4d& T_WORLDEST_LIDAR, bool successful);
 
   Inputs inputs_;
   Params params_;
-  std::vector<Trajectory> trajectories_;
+  std::unordered_map<int64_t, PointCloudIRT> current_traj_scans_in_lidar_;
+  std::vector<Trajectory> trajectories_raw_;
+  std::vector<Trajectory> trajectories_spline_;
   beam_calibration::TfTree input_trajectory_;
   PointCloudIRT::Ptr gt_cloud_in_world_;
-  Eigen::Matrix4d T_World_GtCloud_;
   Eigen::Matrix4d T_MOVING_LIDAR_;
+  Eigen::Matrix4d T_INIT_SPLINE_;
   std::string world_frame_id_;
   std::string moving_frame_id_;
   std::string lidar_frame_id_;
@@ -97,16 +131,12 @@ private:
   std::vector<beam_filtering::FilterParamsType> scan_filters_;
   std::vector<beam_filtering::FilterParamsType> gt_cloud_filters_;
 
-  PointCloudIRT map_;
-  int current_map_size_{0};
   std::string map_save_dir_;
-  ros::Time timestamp_last_;
-  Eigen::Matrix4d T_World_MovingLast_;
   beam::HighResolutionTimer timer_;
   int scan_counter_{0};
+  int total_scans_;
   std::unique_ptr<pcl::visualization::PCLVisualizer> viewer_;
   bool next_scan_{false};
-  bool is_first_scan_{true};
 
   // registration
   using IcpType = pcl::IterativeClosestPoint<PointXYZIRT, PointXYZIRT>;
