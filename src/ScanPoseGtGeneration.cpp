@@ -10,6 +10,7 @@
 
 #include <beam_filtering/VoxelDownsample.h>
 #include <beam_matching/loam/LoamFeatureExtractor.h>
+#include <beam_utils/bspline.h>
 #include <beam_utils/log.h>
 #include <beam_utils/math.h>
 #include <beam_utils/time.h>
@@ -63,7 +64,6 @@ void ScanPoseGtGeneration::LoadExtrinsics() {
   T_MOVING_LIDAR_ =
       extrinsics.GetTransformEigen(moving_frame_id_, lidar_frame_id_).matrix();
   BEAM_INFO("Extracted T_MOVING_LIDAR:");
-  std::cout << T_MOVING_LIDAR_ << "\n";
 }
 
 void ScanPoseGtGeneration::LoadGtCloud() {
@@ -237,12 +237,13 @@ void ScanPoseGtGeneration::RegisterSingleScan(
 
   Eigen::Matrix4d T_WORLD_LIDAR = T_WORLD_WORLDEST * T_WORLDEST_LIDAR;
   DisplayResults(cloud2_in_lidar_frame, T_WORLD_LIDAR, T_WORLDEST_LIDAR, true);
-
   AddRegistrationResult(cloud_in_lidar_frame, T_WORLD_LIDAR, timestamp);
   if (IsMapFull()) {
     FitSplineToTrajectory();
     SaveMaps();
     UpdateT_INIT_SPLINE();
+    trajectories_raw_.push_back(Trajectory());
+    trajectories_spline_.push_back(Trajectory());
   }
 }
 
@@ -262,17 +263,17 @@ PointCloudIRT ScanPoseGtGeneration::ExtractStrongLoamPoints(
 }
 
 void ScanPoseGtGeneration::UpdateT_INIT_SPLINE() {
-  const auto& poseLast = *trajectories_spline_.rbegin()->GetPoses().rbegin();
-  Eigen::Matrix4d T_WORLD_MOVINGLASTSPLINE = poseLast.T_FIXED_MOVING;
+  const Trajectory& traj_last = trajectories_spline_.back();
+  const std::vector<beam::Pose>& poses_last = traj_last.GetPoses();
+  const beam::Pose& pose_last = poses_last.back();
+  Eigen::Matrix4d T_WORLD_MOVINGLASTSPLINE = pose_last.T_FIXED_MOVING;
   ros::Time timestamp_last_spline;
-  timestamp_last_spline.fromNSec(poseLast.timestampInNs);
-
+  timestamp_last_spline.fromNSec(pose_last.timestampInNs);
   Eigen::Matrix4d T_WORLD_MOVINGLASTINIT;
   if (!GetT_WORLDESTINIT_MOVING(timestamp_last_spline,
                                 T_WORLD_MOVINGLASTINIT)) {
     throw std::runtime_error{"cannot update T_INIT_SPLINE"};
   }
-
   T_INIT_SPLINE_ =
       beam::InvertTransform(T_WORLD_MOVINGLASTINIT) * T_WORLD_MOVINGLASTSPLINE;
 }
@@ -333,22 +334,55 @@ bool ScanPoseGtGeneration::IsMapFull() {
 }
 
 void ScanPoseGtGeneration::FitSplineToTrajectory() {
-  // todo
+  const Trajectory& traj_raw = trajectories_raw_.back();
+  std::vector<Eigen::VectorXd> traj_points;
+  for (const beam::Pose& p : traj_raw.GetPoses()) {
+    Eigen::Matrix3d R = p.T_FIXED_MOVING.block(0, 0, 3, 3);
+    Eigen::Vector3d t = p.T_FIXED_MOVING.block(0, 3, 3, 1);
+    Eigen::Quaterniond q(R);
+    Eigen::VectorXd v(8);
+    v(0) = static_cast<double>(p.timestampInNs * 1e-9);
+    v(1) = q.w();
+    v(2) = q.x();
+    v(3) = q.y();
+    v(4) = q.z();
+    v(5) = t[0];
+    v(6) = t[1];
+    v(7) = t[2];
+    traj_points.push_back(v);
+  }
+
+  BEAM_INFO("fitting spline to trajectory with {} poses", traj_raw.Size());
+  timer_.restart();
+  beam::BsplineSE3 spline;
+  spline.feed_trajectory(traj_points);
+  BEAM_INFO("done fitting spline in {}s", timer_.elapsed());
+
+  Trajectory new_traj;
+  for (const beam::Pose& p : traj_raw.GetPoses()) {
+    double time = static_cast<double>(p.timestampInNs * 1e-9);
+    Eigen::Matrix3d R;
+    Eigen::Vector3d t;
+    spline.get_pose(time, R, t);
+    Eigen::Matrix4d T_FIXED_MOVING;
+    T_FIXED_MOVING.block(0, 0, 3, 3) = R;
+    T_FIXED_MOVING.block(0, 3, 3, 1) = t;
+    new_traj.AddPose(p.timestampInNs, T_FIXED_MOVING);
+  }
+  trajectories_spline_.push_back(new_traj);
+  BEAM_INFO("created spline trajectory with {} pose", new_traj.Size());
 }
 
 void ScanPoseGtGeneration::SaveMaps() {
   std::string map_filename1 =
-      "trajectory_raw_" + std::to_string(trajectories_raw_.size() + 1);
+      "trajectory_raw_" + std::to_string(trajectories_raw_.size());
   SaveMap(*trajectories_raw_.rbegin(), map_filename1);
   trajectories_raw_.rbegin()->map_filename = map_filename1;
-  trajectories_raw_.push_back(Trajectory());
 
   std::string map_filename2 =
-      "trajectories_spline_" + std::to_string(trajectories_spline_.size() + 1);
+      "trajectories_spline_" + std::to_string(trajectories_spline_.size());
   SaveMap(*trajectories_spline_.rbegin(), map_filename2);
   trajectories_spline_.rbegin()->map_filename = map_filename2;
-  trajectories_spline_.push_back(Trajectory());
-
   current_traj_scans_in_lidar_.clear();
 }
 
