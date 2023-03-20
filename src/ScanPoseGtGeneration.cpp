@@ -3,6 +3,7 @@
 #include <fstream>
 
 #include <boost/filesystem.hpp>
+#include <boost/filesystem/operations.hpp>
 #include <pcl/common/transforms.h>
 #include <pcl/io/pcd_io.h>
 #include <rosbag/bag.h>
@@ -98,7 +99,9 @@ void ScanPoseGtGeneration::LoadGtCloud() {
     throw std::runtime_error{
         "T_WORLD_GTCLOUD is not a valid transformation matrix"};
   }
-  BEAM_INFO("loaded T_WORLD_GTCLOUD: ");
+  BEAM_INFO("loaded T_WORLD_GTCLOUD ");
+
+  BEAM_INFO("filtering input cloud");
   PointCloudIRT gt_cloud_in_world;
   pcl::transformPointCloud(gt_cloud_in, gt_cloud_in_world, T_WORLD_GTCLOUD);
 
@@ -335,38 +338,17 @@ bool ScanPoseGtGeneration::IsMapFull() {
 
 void ScanPoseGtGeneration::FitSplineToTrajectory() {
   const Trajectory& traj_raw = trajectories_raw_.back();
-  std::vector<Eigen::VectorXd> traj_points;
-  for (const beam::Pose& p : traj_raw.GetPoses()) {
-    Eigen::Matrix3d R = p.T_FIXED_MOVING.block(0, 0, 3, 3);
-    Eigen::Vector3d t = p.T_FIXED_MOVING.block(0, 3, 3, 1);
-    Eigen::Quaterniond q(R);
-    Eigen::VectorXd v(8);
-    v(0) = static_cast<double>(p.timestampInNs * 1e-9);
-    v(1) = q.w();
-    v(2) = q.x();
-    v(3) = q.y();
-    v(4) = q.z();
-    v(5) = t[0];
-    v(6) = t[1];
-    v(7) = t[2];
-    traj_points.push_back(v);
-  }
-
   BEAM_INFO("fitting spline to trajectory with {} poses", traj_raw.Size());
   timer_.restart();
   beam::BsplineSE3 spline;
-  spline.feed_trajectory(traj_points);
+  spline.feed_trajectory(traj_raw.GetPoses());
   BEAM_INFO("done fitting spline in {}s", timer_.elapsed());
 
   Trajectory new_traj;
   for (const beam::Pose& p : traj_raw.GetPoses()) {
     double time = static_cast<double>(p.timestampInNs * 1e-9);
-    Eigen::Matrix3d R;
-    Eigen::Vector3d t;
-    spline.get_pose(time, R, t);
     Eigen::Matrix4d T_FIXED_MOVING;
-    T_FIXED_MOVING.block(0, 0, 3, 3) = R;
-    T_FIXED_MOVING.block(0, 3, 3, 1) = t;
+    spline.get_pose(time, T_FIXED_MOVING);
     new_traj.AddPose(p.timestampInNs, T_FIXED_MOVING);
   }
   trajectories_spline_.push_back(new_traj);
@@ -375,12 +357,12 @@ void ScanPoseGtGeneration::FitSplineToTrajectory() {
 
 void ScanPoseGtGeneration::SaveMaps() {
   std::string map_filename1 =
-      "trajectory_raw_" + std::to_string(trajectories_raw_.size());
+      "map_raw_" + std::to_string(trajectories_raw_.size());
   SaveMap(*trajectories_raw_.rbegin(), map_filename1);
   trajectories_raw_.rbegin()->map_filename = map_filename1;
 
   std::string map_filename2 =
-      "trajectories_spline_" + std::to_string(trajectories_spline_.size());
+      "map_spline_" + std::to_string(trajectories_spline_.size());
   SaveMap(*trajectories_spline_.rbegin(), map_filename2);
   trajectories_spline_.rbegin()->map_filename = map_filename2;
   current_traj_scans_in_lidar_.clear();
@@ -401,10 +383,8 @@ void ScanPoseGtGeneration::SaveMap(const Trajectory& trajectory,
   }
 
   std::string err;
-  std::string map_filename = name;
-  std::string map_filepath =
-      beam::CombinePaths(map_save_dir_, map_filename + ".pcd");
-  BEAM_INFO("saving map to: {}", map_filepath + ".pcd");
+  std::string map_filepath = beam::CombinePaths(map_save_dir_, name + ".pcd");
+  BEAM_INFO("saving map of size {} to: {}", map.size(), map_filepath);
   if (!beam::SavePointCloud<PointXYZIRT>(
           map_filepath, map, beam::PointCloudFileType::PCDBINARY, err)) {
     BEAM_CRITICAL("unable to save map, reason: {}", err);
@@ -416,7 +396,10 @@ void ScanPoseGtGeneration::SaveTrajectories(
     const std::vector<Trajectory>& trajectory, const std::string& name) {
   std::vector<std::string> trajectory_names;
   beam_mapping::Poses poses_all;
+  int counter{0};
   for (const Trajectory& t : trajectory) {
+    if (t.Size() == 0) { continue; }
+    counter++;
     beam_mapping::Poses poses_current;
     for (const beam::Pose& p : t.GetPoses()) {
       ros::Time time_ros;
@@ -430,8 +413,13 @@ void ScanPoseGtGeneration::SaveTrajectories(
     poses_current.SetMovingFrame(moving_frame_id_);
     std::string poses_name = beam::CombinePaths(inputs_.output_directory,
                                                 t.map_filename + "_poses.json");
-    poses_current.WriteToJSON(poses_name);
+    BEAM_INFO("saving {} poses for trajectory {}",
+              poses_current.GetTimeStamps().size(), counter);
+    poses_current.WriteToFile(poses_name, "JSON");
     trajectory_names.push_back(poses_name);
+    poses_name = beam::CombinePaths(inputs_.output_directory,
+                                    t.map_filename + "_poses.pcd");
+    poses_current.WriteToFile(poses_name, "PCD");
   }
 
   // save list of trajectories
@@ -445,8 +433,10 @@ void ScanPoseGtGeneration::SaveTrajectories(
   // save combined
   poses_all.SetFixedFrame(world_frame_id_);
   poses_all.SetMovingFrame(moving_frame_id_);
-  poses_all.WriteToJSON(beam::CombinePaths(inputs_.output_directory,
-                                           name + "_poses_combined.json"));
+  std::string combined_name =
+      beam::CombinePaths(inputs_.output_directory, name + "_poses_combined");
+  poses_all.WriteToFile(combined_name + ".json", "JSON");
+  poses_all.WriteToFile(combined_name + ".pcd", "PCD");
 }
 
 void ScanPoseGtGeneration::SaveResults() {
@@ -457,15 +447,21 @@ void ScanPoseGtGeneration::SaveResults() {
   std::string output_config =
       beam::CombinePaths(inputs_.output_directory, "config_copy.json");
   BEAM_INFO("copying config file to: {}", output_config);
-  boost::filesystem::copy_file(inputs_.config, output_config);
+  boost::filesystem::copy_file(
+      inputs_.config, output_config,
+      boost::filesystem::copy_option::overwrite_if_exists);
   std::string output_gt_cloud =
       beam::CombinePaths(inputs_.output_directory, "gt_cloud_copy.pcd");
   BEAM_INFO("copying gt cloud to: {}", output_gt_cloud);
-  boost::filesystem::copy_file(inputs_.gt_cloud, output_gt_cloud);
+  boost::filesystem::copy_file(
+      inputs_.gt_cloud, output_gt_cloud,
+      boost::filesystem::copy_option::overwrite_if_exists);
   std::string output_gt_cloud_pose =
       beam::CombinePaths(inputs_.output_directory, "gt_cloud_pose_copy.json");
   BEAM_INFO("copying gt cloud pose file to: {}", output_gt_cloud_pose);
-  boost::filesystem::copy_file(inputs_.gt_cloud_pose, output_gt_cloud_pose);
+  boost::filesystem::copy_file(
+      inputs_.gt_cloud_pose, output_gt_cloud_pose,
+      boost::filesystem::copy_option::overwrite_if_exists);
 }
 
 void ScanPoseGtGeneration::DisplayResults(
