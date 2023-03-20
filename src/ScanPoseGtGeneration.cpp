@@ -246,7 +246,6 @@ void ScanPoseGtGeneration::RegisterSingleScan(
     SaveMaps();
     UpdateT_INIT_SPLINE();
     trajectories_raw_.push_back(Trajectory());
-    trajectories_spline_.push_back(Trajectory());
   }
 }
 
