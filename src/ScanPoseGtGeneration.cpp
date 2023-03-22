@@ -204,6 +204,16 @@ void ScanPoseGtGeneration::RegisterScans() {
 
 void ScanPoseGtGeneration::RegisterSingleScan(
     const PointCloudIRT& cloud_in_lidar_frame, const ros::Time& timestamp) {
+  // if first scan, update submap poses
+  if (trajectories_raw_.empty()) {
+    bool successful = GetT_WORLD_MOVING_INIT(timestamp, T_WORLD_SUBMAP_INIT_);
+    T_WORLD_SUBMAP_ALIGNED_ = T_WORLD_SUBMAP_INIT_;
+    if (!successful) {
+      BEAM_WARN("Update T_WORLD_SUBMAP failed!, skipping scan");
+      return;
+    }
+  }
+
   PointCloudIRT cloud2_in_lidar_frame =
       ExtractStrongLoamPoints(cloud_in_lidar_frame);
 
@@ -216,7 +226,7 @@ void ScanPoseGtGeneration::RegisterSingleScan(
   // if first scan, get estimated pose straight from poses. Otherwise, get only
   // relative pose from poses
   Eigen::Matrix4d T_WORLDEST_MOVING;
-  if (!GetT_WORLDEST_MOVING(timestamp, T_WORLDEST_MOVING)) { return; }
+  if (!GetT_WORLD_MOVINGEST(timestamp, T_WORLDEST_MOVING)) { return; }
   Eigen::Matrix4d T_WORLDEST_LIDAR = T_WORLDEST_MOVING * T_MOVING_LIDAR_;
 
   pcl::transformPointCloud(cloud_filtered_in_lidar_frame, *cloud_in_WorldEst,
@@ -240,11 +250,12 @@ void ScanPoseGtGeneration::RegisterSingleScan(
 
   Eigen::Matrix4d T_WORLD_LIDAR = T_WORLD_WORLDEST * T_WORLDEST_LIDAR;
   DisplayResults(cloud2_in_lidar_frame, T_WORLD_LIDAR, T_WORLDEST_LIDAR, true);
-  AddRegistrationResult(cloud_in_lidar_frame, T_WORLD_LIDAR, timestamp);
+  AddRegistrationResult(cloud_filtered_in_lidar_frame, T_WORLD_LIDAR,
+                        timestamp);
   if (IsMapFull()) {
     FitSplineToTrajectory();
+    UpdateT_WORLD_SUBMAP();
     SaveMaps();
-    UpdateT_INIT_SPLINE();
     trajectories_raw_.push_back(Trajectory());
   }
 }
@@ -264,39 +275,61 @@ PointCloudIRT ScanPoseGtGeneration::ExtractStrongLoamPoints(
   return cloud_out;
 }
 
-void ScanPoseGtGeneration::UpdateT_INIT_SPLINE() {
-  const Trajectory& traj_last = trajectories_spline_.back();
-  const std::vector<beam::Pose>& poses_last = traj_last.GetPoses();
-  const beam::Pose& pose_last = poses_last.back();
-  Eigen::Matrix4d T_WORLD_MOVINGLASTSPLINE = pose_last.T_FIXED_MOVING;
-  ros::Time timestamp_last_spline;
-  timestamp_last_spline.fromNSec(pose_last.timestampInNs);
-  Eigen::Matrix4d T_WORLD_MOVINGLASTINIT;
-  if (!GetT_WORLDESTINIT_MOVING(timestamp_last_spline,
-                                T_WORLD_MOVINGLASTINIT)) {
-    throw std::runtime_error{"cannot update T_INIT_SPLINE"};
+void ScanPoseGtGeneration::UpdateT_WORLD_SUBMAP() {
+  const Trajectory& traj = trajectories_spline_.back();
+
+  // get last spline traj pose, set this to the submap pose
+  ros::Time last_pose_time;
+  last_pose_time.fromNSec(traj.back().timestampInNs);
+  const Eigen::Matrix4d& T_WORLD_SUBMAP_EST = traj.back().T_FIXED_MOVING;
+
+  // get initial pose to be used later
+  bool successful =
+      GetT_WORLD_MOVING_INIT(last_pose_time, T_WORLD_SUBMAP_INIT_);
+  if (!successful) { throw std::runtime_error{"UpdateT_WORLD_SUBMAP failed!"}; }
+
+  BEAM_INFO("Registering submap to GT map...");
+  timer_.restart();
+
+  PointCloudIRT map_in_submap_est;
+  for (const beam::Pose& pose : traj.GetPoses()) {
+    const PointCloudIRT& cloud_in_lidar =
+        current_traj_scans_in_lidar_.at(pose.timestampInNs);
+    PointCloudIRT cloud_in_submap_est;
+    const Eigen::Matrix4d& T_WORLD_MOVING_EST = pose.T_FIXED_MOVING;
+    Eigen::Matrix4d T_SUBMAPEST_LIDAR =
+        beam::InvertTransform(T_WORLD_SUBMAP_EST) * T_WORLD_MOVING_EST *
+        T_MOVING_LIDAR_;
+    pcl::transformPointCloud(cloud_in_lidar, cloud_in_submap_est,
+                             T_SUBMAPEST_LIDAR);
+    map_in_submap_est += cloud_in_world;
   }
-  T_INIT_SPLINE_ =
-      beam::InvertTransform(T_WORLD_MOVINGLASTINIT) * T_WORLD_MOVINGLASTSPLINE;
+
+  PointCloudIRT map_in_world_est;
+  pcl::transformPointCloud(map_in_submap_est, map_in_world_est,
+                             T_WORLD_SUBMAP_EST)
+  PointCloudIRT registered_cloud;
+  icp_->setInputSource(map_in_world_est);
+  icp_->align(registered_cloud);
+  Eigen::Matrix4d T_WORLD_WORLDEST =
+      icp_->getFinalTransformation().cast<double>();
+  BEAM_INFO("Registration time: {}s", timer_.elapsed());
+  T_WORLD_SUBMAP_ALIGNED_ = T_WORLD_WORLDEST * T_WORLD_SUBMAP_EST;
 }
 
-bool ScanPoseGtGeneration::GetT_WORLDEST_MOVING(
-    const ros::Time& timestamp, Eigen::Matrix4d& T_WORLD_MOVING) {
+bool ScanPoseGtGeneration::GetT_WORLD_MOVING(const ros::Time& timestamp,
+                                             Eigen::Matrix4d& T_WORLD_MOVING) {
   Eigen::Matrix4d T_WORLD_MOVING_INIT;
-  bool successful = GetT_WORLDESTINIT_MOVING(timestamp, T_WORLD_MOVING_INIT);
+  bool successful = GetT_WORLD_MOVING_INIT(timestamp, T_WORLD_MOVING_INIT);
   if (!successful) { return false; }
 
-  if (trajectories_raw_.size() < 2) {
-    T_WORLD_MOVING = T_WORLD_MOVING_INIT;
-    return true;
-  }
-
-  // get pose relative to end of last trajectory
-  T_WORLD_MOVING = T_WORLD_MOVING_INIT * T_INIT_SPLINE_;
+  Eigen::Matrix4d T_SUBMAP_MOVING =
+      beam::InvertTransform(T_WORLD_SUBMAP_INIT_) * T_WORLD_MOVING_INIT;
+  T_WORLD_MOVING = T_WORLD_SUBMAP_ * T_SUBMAP_MOVING;
   return true;
 }
 
-bool ScanPoseGtGeneration::GetT_WORLDESTINIT_MOVING(
+bool ScanPoseGtGeneration::GetT_WORLD_MOVING_INIT(
     const ros::Time& timestamp, Eigen::Matrix4d& T_WORLD_MOVING) {
   try {
     T_WORLD_MOVING =
@@ -347,8 +380,9 @@ void ScanPoseGtGeneration::FitSplineToTrajectory() {
   for (const beam::Pose& p : traj_raw.GetPoses()) {
     double time = static_cast<double>(p.timestampInNs * 1e-9);
     Eigen::Matrix4d T_FIXED_MOVING;
-    spline.get_pose(time, T_FIXED_MOVING);
-    new_traj.AddPose(p.timestampInNs, T_FIXED_MOVING);
+    if (spline.get_pose(time, T_FIXED_MOVING)) {
+      new_traj.AddPose(p.timestampInNs, T_FIXED_MOVING);
+    }
   }
   trajectories_spline_.push_back(new_traj);
   BEAM_INFO("created spline trajectory with {} pose", new_traj.Size());

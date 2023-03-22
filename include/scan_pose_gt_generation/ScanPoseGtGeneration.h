@@ -96,10 +96,10 @@ private:
   void RegisterSingleScan(const PointCloudIRT& cloud_in_lidar_frame,
                           const ros::Time& timestamp);
   PointCloudIRT ExtractStrongLoamPoints(const PointCloudIRT& cloud_in);
-  void UpdateT_INIT_SPLINE();
-  bool GetT_WORLDEST_MOVING(const ros::Time& timestamp,
+  void UpdateT_WORLD_SUBMAP();
+  bool GetT_WORLD_MOVING(const ros::Time& timestamp,
                             Eigen::Matrix4d& T_WORLD_MOVING);
-  bool GetT_WORLDESTINIT_MOVING(const ros::Time& timestamp,
+  bool GetT_WORLD_MOVING_INIT(const ros::Time& timestamp,
                                 Eigen::Matrix4d& T_WORLD_MOVING);
   void AddRegistrationResult(const PointCloudIRT& cloud_in_lidar_frame,
                              const Eigen::Matrix4d& T_WORLD_LIDAR,
@@ -123,7 +123,8 @@ private:
   beam_calibration::TfTree input_trajectory_;
   PointCloudIRT::Ptr gt_cloud_in_world_;
   Eigen::Matrix4d T_MOVING_LIDAR_;
-  Eigen::Matrix4d T_INIT_SPLINE_;
+  Eigen::Matrix4d T_WORLD_SUBMAP_ALIGNED_;
+  Eigen::Matrix4d T_WORLD_SUBMAP_INIT_;
   std::string world_frame_id_;
   std::string moving_frame_id_;
   std::string lidar_frame_id_;
