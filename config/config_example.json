@@ -38,10 +38,40 @@
     {
       "filter_type": "VOXEL",
       "cell_size": [
-        0.01,
-        0.01,
-        0.01
+        0.02,
+        0.02,
+        0.02
       ]
+    }
+  ],
+  "output_filters": [
+    {
+      "filter_type": "CROPBOX",
+      "min": [
+        -0.6,
+        -0.5,
+        -0.5
+      ],
+      "max": [
+        0.6,
+        0.5,
+        0.5
+      ],
+      "remove_outside_points": false
+    },
+    {
+      "filter_type": "CROPBOX",
+      "min": [
+        -15,
+        -15,
+        -15
+      ],
+      "max": [
+        15,
+        15,
+        15
+      ],
+      "remove_outside_points": true
     }
   ]
 }

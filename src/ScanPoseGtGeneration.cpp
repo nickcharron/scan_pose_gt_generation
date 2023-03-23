@@ -35,8 +35,8 @@ void ScanPoseGtGeneration::LoadConfig() {
   }
 
   if (!J.contains("save_map") || !J.contains("scan_filters") ||
-      !J.contains("gt_cloud_filters") || !J.contains("point_size") ||
-      !J.contains("extract_loam_points") ||
+      !J.contains("gt_cloud_filters") || !J.contains("output_filters") ||
+      !J.contains("point_size") || !J.contains("extract_loam_points") ||
       !J.contains("max_spline_length_m") ||
       !J.contains("min_spline_measurements")) {
     throw std::runtime_error{
@@ -49,14 +49,21 @@ void ScanPoseGtGeneration::LoadConfig() {
   params_.max_spline_length_m = J["max_spline_length_m"].get<double>();
   params_.min_spline_measurements = J["min_spline_measurements"].get<int>();
 
+  std::string date = beam::ConvertTimeToDate(std::chrono::system_clock::now());
+  root_save_dir_ = beam::CombinePaths(inputs_.output_directory, date);
+  boost::filesystem::create_directory(root_save_dir_);
+  poses_save_dir_ = beam::CombinePaths(root_save_dir_, "submap_poses");
+  boost::filesystem::create_directory(poses_save_dir_);
+
   if (params_.save_map) {
-    map_save_dir_ = beam::CombinePaths(inputs_.output_directory, "gt_maps");
+    map_save_dir_ = beam::CombinePaths(root_save_dir_, "submaps");
     boost::filesystem::create_directory(map_save_dir_);
   }
 
   scan_filters_ = beam_filtering::LoadFilterParamsVector(J["scan_filters"]);
   gt_cloud_filters_ =
       beam_filtering::LoadFilterParamsVector(J["gt_cloud_filters"]);
+  output_filters_ = beam_filtering::LoadFilterParamsVector(J["output_filters"]);
 }
 
 void ScanPoseGtGeneration::LoadExtrinsics() {
@@ -200,6 +207,10 @@ void ScanPoseGtGeneration::RegisterScans() {
     pcl::fromPCLPointCloud2(*pcl_pc2_tmp, cloud);
     RegisterSingleScan(cloud, timestamp);
   }
+
+  // save remainder of scans
+  FitSplineToTrajectory();
+  SaveMaps();
 }
 
 void ScanPoseGtGeneration::RegisterSingleScan(
@@ -226,7 +237,7 @@ void ScanPoseGtGeneration::RegisterSingleScan(
   // if first scan, get estimated pose straight from poses. Otherwise, get only
   // relative pose from poses
   Eigen::Matrix4d T_WORLDEST_MOVING;
-  if (!GetT_WORLD_MOVINGEST(timestamp, T_WORLDEST_MOVING)) { return; }
+  if (!GetT_WORLD_MOVING(timestamp, T_WORLDEST_MOVING)) { return; }
   Eigen::Matrix4d T_WORLDEST_LIDAR = T_WORLDEST_MOVING * T_MOVING_LIDAR_;
 
   pcl::transformPointCloud(cloud_filtered_in_lidar_frame, *cloud_in_WorldEst,
@@ -250,8 +261,7 @@ void ScanPoseGtGeneration::RegisterSingleScan(
 
   Eigen::Matrix4d T_WORLD_LIDAR = T_WORLD_WORLDEST * T_WORLDEST_LIDAR;
   DisplayResults(cloud2_in_lidar_frame, T_WORLD_LIDAR, T_WORLDEST_LIDAR, true);
-  AddRegistrationResult(cloud_filtered_in_lidar_frame, T_WORLD_LIDAR,
-                        timestamp);
+  AddRegistrationResult(cloud_in_lidar_frame, T_WORLD_LIDAR, timestamp);
   if (IsMapFull()) {
     FitSplineToTrajectory();
     UpdateT_WORLD_SUBMAP();
@@ -280,8 +290,9 @@ void ScanPoseGtGeneration::UpdateT_WORLD_SUBMAP() {
 
   // get last spline traj pose, set this to the submap pose
   ros::Time last_pose_time;
-  last_pose_time.fromNSec(traj.back().timestampInNs);
-  const Eigen::Matrix4d& T_WORLD_SUBMAP_EST = traj.back().T_FIXED_MOVING;
+  last_pose_time.fromNSec(traj.GetPoses().back().timestampInNs);
+  const Eigen::Matrix4d& T_WORLD_SUBMAP_EST =
+      traj.GetPoses().back().T_FIXED_MOVING;
 
   // get initial pose to be used later
   bool successful =
@@ -295,26 +306,35 @@ void ScanPoseGtGeneration::UpdateT_WORLD_SUBMAP() {
   for (const beam::Pose& pose : traj.GetPoses()) {
     const PointCloudIRT& cloud_in_lidar =
         current_traj_scans_in_lidar_.at(pose.timestampInNs);
+
+    // filter
+    PointCloudIRT cloud2_in_lidar_frame =
+        ExtractStrongLoamPoints(cloud_in_lidar);
+    PointCloudIRT cloud_filtered_in_lidar_frame =
+        beam_filtering::FilterPointCloud<PointXYZIRT>(cloud2_in_lidar_frame,
+                                                      scan_filters_);
+
+    // transform
     PointCloudIRT cloud_in_submap_est;
     const Eigen::Matrix4d& T_WORLD_MOVING_EST = pose.T_FIXED_MOVING;
     Eigen::Matrix4d T_SUBMAPEST_LIDAR =
         beam::InvertTransform(T_WORLD_SUBMAP_EST) * T_WORLD_MOVING_EST *
         T_MOVING_LIDAR_;
-    pcl::transformPointCloud(cloud_in_lidar, cloud_in_submap_est,
+    pcl::transformPointCloud(cloud_filtered_in_lidar_frame, cloud_in_submap_est,
                              T_SUBMAPEST_LIDAR);
-    map_in_submap_est += cloud_in_world;
+    map_in_submap_est += cloud_in_submap_est;
   }
 
-  PointCloudIRT map_in_world_est;
-  pcl::transformPointCloud(map_in_submap_est, map_in_world_est,
-                             T_WORLD_SUBMAP_EST)
+  PointCloudIRT::Ptr map_in_world_est = std::make_shared<PointCloudIRT>();
+  pcl::transformPointCloud(map_in_submap_est, *map_in_world_est,
+                           T_WORLD_SUBMAP_EST);
   PointCloudIRT registered_cloud;
   icp_->setInputSource(map_in_world_est);
   icp_->align(registered_cloud);
   Eigen::Matrix4d T_WORLD_WORLDEST =
       icp_->getFinalTransformation().cast<double>();
   BEAM_INFO("Registration time: {}s", timer_.elapsed());
-  T_WORLD_SUBMAP_ALIGNED_ = T_WORLD_WORLDEST * T_WORLD_SUBMAP_EST;
+  T_WORLD_SUBMAP_ALIGNED_ = beam::InvertTransform(T_WORLD_WORLDEST) * T_WORLD_SUBMAP_EST;
 }
 
 bool ScanPoseGtGeneration::GetT_WORLD_MOVING(const ros::Time& timestamp,
@@ -325,7 +345,7 @@ bool ScanPoseGtGeneration::GetT_WORLD_MOVING(const ros::Time& timestamp,
 
   Eigen::Matrix4d T_SUBMAP_MOVING =
       beam::InvertTransform(T_WORLD_SUBMAP_INIT_) * T_WORLD_MOVING_INIT;
-  T_WORLD_MOVING = T_WORLD_SUBMAP_ * T_SUBMAP_MOVING;
+  T_WORLD_MOVING = T_WORLD_SUBMAP_ALIGNED_ * T_SUBMAP_MOVING;
   return true;
 }
 
@@ -409,9 +429,13 @@ void ScanPoseGtGeneration::SaveMap(const Trajectory& trajectory,
   for (const beam::Pose& pose : trajectory.GetPoses()) {
     const PointCloudIRT& cloud_in_lidar =
         current_traj_scans_in_lidar_.at(pose.timestampInNs);
+    PointCloudIRT cloud_filtered_in_lidar_frame =
+        beam_filtering::FilterPointCloud<PointXYZIRT>(cloud_in_lidar,
+                                                      output_filters_);
     PointCloudIRT cloud_in_world;
     Eigen::Matrix4d T_WORLD_LIDAR = pose.T_FIXED_MOVING * T_MOVING_LIDAR_;
-    pcl::transformPointCloud(cloud_in_lidar, cloud_in_world, T_WORLD_LIDAR);
+    pcl::transformPointCloud(cloud_filtered_in_lidar_frame, cloud_in_world,
+                             T_WORLD_LIDAR);
     map += cloud_in_world;
   }
 
@@ -444,14 +468,14 @@ void ScanPoseGtGeneration::SaveTrajectories(
     }
     poses_current.SetFixedFrame(world_frame_id_);
     poses_current.SetMovingFrame(moving_frame_id_);
-    std::string poses_name = beam::CombinePaths(inputs_.output_directory,
-                                                t.map_filename + "_poses.json");
+    std::string poses_name =
+        beam::CombinePaths(poses_save_dir_, t.map_filename + "_poses.json");
     BEAM_INFO("saving {} poses for trajectory {}",
               poses_current.GetTimeStamps().size(), counter);
     poses_current.WriteToFile(poses_name, "JSON");
     trajectory_names.push_back(poses_name);
-    poses_name = beam::CombinePaths(inputs_.output_directory,
-                                    t.map_filename + "_poses.pcd");
+    poses_name =
+        beam::CombinePaths(poses_save_dir_, t.map_filename + "_poses.pcd");
     poses_current.WriteToFile(poses_name, "PCD");
   }
 
@@ -459,7 +483,7 @@ void ScanPoseGtGeneration::SaveTrajectories(
   nlohmann::json J;
   J["trajectories"] = trajectory_names;
   std::string filename =
-      beam::CombinePaths(inputs_.output_directory, name + "_list.json");
+      beam::CombinePaths(root_save_dir_, name + "_list.json");
   std::ofstream o(filename);
   o << std::setw(4) << J << std::endl;
 
@@ -467,7 +491,7 @@ void ScanPoseGtGeneration::SaveTrajectories(
   poses_all.SetFixedFrame(world_frame_id_);
   poses_all.SetMovingFrame(moving_frame_id_);
   std::string combined_name =
-      beam::CombinePaths(inputs_.output_directory, name + "_poses_combined");
+      beam::CombinePaths(root_save_dir_, name + "_poses_combined");
   poses_all.WriteToFile(combined_name + ".json", "JSON");
   poses_all.WriteToFile(combined_name + ".pcd", "PCD");
 }
@@ -478,19 +502,19 @@ void ScanPoseGtGeneration::SaveResults() {
 
   // copy over files to output
   std::string output_config =
-      beam::CombinePaths(inputs_.output_directory, "config_copy.json");
+      beam::CombinePaths(root_save_dir_, "config_copy.json");
   BEAM_INFO("copying config file to: {}", output_config);
   boost::filesystem::copy_file(
       inputs_.config, output_config,
       boost::filesystem::copy_option::overwrite_if_exists);
   std::string output_gt_cloud =
-      beam::CombinePaths(inputs_.output_directory, "gt_cloud_copy.pcd");
+      beam::CombinePaths(root_save_dir_, "gt_cloud_copy.pcd");
   BEAM_INFO("copying gt cloud to: {}", output_gt_cloud);
   boost::filesystem::copy_file(
       inputs_.gt_cloud, output_gt_cloud,
       boost::filesystem::copy_option::overwrite_if_exists);
   std::string output_gt_cloud_pose =
-      beam::CombinePaths(inputs_.output_directory, "gt_cloud_pose_copy.json");
+      beam::CombinePaths(root_save_dir_, "gt_cloud_pose_copy.json");
   BEAM_INFO("copying gt cloud pose file to: {}", output_gt_cloud_pose);
   boost::filesystem::copy_file(
       inputs_.gt_cloud_pose, output_gt_cloud_pose,

@@ -131,8 +131,12 @@ private:
 
   std::vector<beam_filtering::FilterParamsType> scan_filters_;
   std::vector<beam_filtering::FilterParamsType> gt_cloud_filters_;
+  std::vector<beam_filtering::FilterParamsType> output_filters_;
 
   std::string map_save_dir_;
+  std::string poses_save_dir_;
+  std::string root_save_dir_;
+  
   beam::HighResolutionTimer timer_;
   int scan_counter_{0};
   int total_scans_;
