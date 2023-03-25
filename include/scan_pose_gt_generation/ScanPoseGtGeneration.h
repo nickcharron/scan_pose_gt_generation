@@ -96,7 +96,6 @@ private:
   void RegisterSingleScan(const PointCloudIRT& cloud_in_lidar_frame,
                           const ros::Time& timestamp);
   PointCloudIRT ExtractStrongLoamPoints(const PointCloudIRT& cloud_in);
-  void UpdateT_WORLD_SUBMAP();
   bool GetT_WORLD_MOVING(const ros::Time& timestamp,
                             Eigen::Matrix4d& T_WORLD_MOVING);
   bool GetT_WORLD_MOVING_INIT(const ros::Time& timestamp,
@@ -108,6 +107,7 @@ private:
   void FitSplineToTrajectory();
   void SaveMaps();
   void SaveMap(const Trajectory& trajectory, const std::string& name);
+  void SaveTrajectory(const Trajectory& trajectory);
   void SaveTrajectories(const std::vector<Trajectory>& trajectory,
                         const std::string& name);
   void SaveResults();
@@ -120,11 +120,11 @@ private:
   std::unordered_map<int64_t, PointCloudIRT> current_traj_scans_in_lidar_;
   std::vector<Trajectory> trajectories_raw_;
   std::vector<Trajectory> trajectories_spline_;
+  std::list<Eigen::Matrix4d, beam::AlignMat4d> T_WORLD_WORLDINIT_;
+  int pose_drift_queue_size_{6};
   beam_calibration::TfTree input_trajectory_;
   PointCloudIRT::Ptr gt_cloud_in_world_;
   Eigen::Matrix4d T_MOVING_LIDAR_;
-  Eigen::Matrix4d T_WORLD_SUBMAP_ALIGNED_;
-  Eigen::Matrix4d T_WORLD_SUBMAP_INIT_;
   std::string world_frame_id_;
   std::string moving_frame_id_;
   std::string lidar_frame_id_;
@@ -136,7 +136,8 @@ private:
   std::string map_save_dir_;
   std::string poses_save_dir_;
   std::string root_save_dir_;
-  
+  std::vector<std::string> trajectory_names_;
+
   beam::HighResolutionTimer timer_;
   int scan_counter_{0};
   int total_scans_;

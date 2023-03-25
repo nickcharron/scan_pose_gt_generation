@@ -215,16 +215,6 @@ void ScanPoseGtGeneration::RegisterScans() {
 
 void ScanPoseGtGeneration::RegisterSingleScan(
     const PointCloudIRT& cloud_in_lidar_frame, const ros::Time& timestamp) {
-  // if first scan, update submap poses
-  if (trajectories_raw_.empty()) {
-    bool successful = GetT_WORLD_MOVING_INIT(timestamp, T_WORLD_SUBMAP_INIT_);
-    T_WORLD_SUBMAP_ALIGNED_ = T_WORLD_SUBMAP_INIT_;
-    if (!successful) {
-      BEAM_WARN("Update T_WORLD_SUBMAP failed!, skipping scan");
-      return;
-    }
-  }
-
   PointCloudIRT cloud2_in_lidar_frame =
       ExtractStrongLoamPoints(cloud_in_lidar_frame);
 
@@ -254,17 +244,22 @@ void ScanPoseGtGeneration::RegisterSingleScan(
   BEAM_INFO("Registration time: {}s", timer_.elapsed());
 
   if (!icp_->hasConverged()) {
-    DisplayResults(cloud2_in_lidar_frame, Eigen::Matrix4d(), T_WORLDEST_LIDAR,
-                   false);
+    DisplayResults(cloud_filtered_in_lidar_frame, Eigen::Matrix4d(),
+                   T_WORLDEST_LIDAR, false);
     return;
   }
 
+  T_WORLD_WORLDINIT_.push_back(T_WORLD_WORLDEST);
+  if (T_WORLD_WORLDINIT_.size() > pose_drift_queue_size_) {
+    T_WORLD_WORLDINIT_.pop_front();
+  }
+
   Eigen::Matrix4d T_WORLD_LIDAR = T_WORLD_WORLDEST * T_WORLDEST_LIDAR;
-  DisplayResults(cloud2_in_lidar_frame, T_WORLD_LIDAR, T_WORLDEST_LIDAR, true);
+  DisplayResults(cloud_filtered_in_lidar_frame, T_WORLD_LIDAR, T_WORLDEST_LIDAR,
+                 true);
   AddRegistrationResult(cloud_in_lidar_frame, T_WORLD_LIDAR, timestamp);
   if (IsMapFull()) {
     FitSplineToTrajectory();
-    UpdateT_WORLD_SUBMAP();
     SaveMaps();
     trajectories_raw_.push_back(Trajectory());
   }
@@ -278,74 +273,27 @@ PointCloudIRT ScanPoseGtGeneration::ExtractStrongLoamPoints(
   beam_matching::LoamFeatureExtractor extractor(params);
   beam_matching::LoamPointCloud loam_cloud =
       extractor.ExtractFeatures(cloud_in);
-  loam_cloud.edges.weak.Clear();
-  loam_cloud.surfaces.weak.Clear();
+  // loam_cloud.edges.weak.Clear();
+  // loam_cloud.surfaces.weak.Clear();
   PointCloudIRT cloud_out;
   pcl::copyPointCloud(loam_cloud.GetCombinedCloud(), cloud_out);
   return cloud_out;
 }
 
-void ScanPoseGtGeneration::UpdateT_WORLD_SUBMAP() {
-  const Trajectory& traj = trajectories_spline_.back();
-
-  // get last spline traj pose, set this to the submap pose
-  ros::Time last_pose_time;
-  last_pose_time.fromNSec(traj.GetPoses().back().timestampInNs);
-  const Eigen::Matrix4d& T_WORLD_SUBMAP_EST =
-      traj.GetPoses().back().T_FIXED_MOVING;
-
-  // get initial pose to be used later
-  bool successful =
-      GetT_WORLD_MOVING_INIT(last_pose_time, T_WORLD_SUBMAP_INIT_);
-  if (!successful) { throw std::runtime_error{"UpdateT_WORLD_SUBMAP failed!"}; }
-
-  BEAM_INFO("Registering submap to GT map...");
-  timer_.restart();
-
-  PointCloudIRT map_in_submap_est;
-  for (const beam::Pose& pose : traj.GetPoses()) {
-    const PointCloudIRT& cloud_in_lidar =
-        current_traj_scans_in_lidar_.at(pose.timestampInNs);
-
-    // filter
-    PointCloudIRT cloud2_in_lidar_frame =
-        ExtractStrongLoamPoints(cloud_in_lidar);
-    PointCloudIRT cloud_filtered_in_lidar_frame =
-        beam_filtering::FilterPointCloud<PointXYZIRT>(cloud2_in_lidar_frame,
-                                                      scan_filters_);
-
-    // transform
-    PointCloudIRT cloud_in_submap_est;
-    const Eigen::Matrix4d& T_WORLD_MOVING_EST = pose.T_FIXED_MOVING;
-    Eigen::Matrix4d T_SUBMAPEST_LIDAR =
-        beam::InvertTransform(T_WORLD_SUBMAP_EST) * T_WORLD_MOVING_EST *
-        T_MOVING_LIDAR_;
-    pcl::transformPointCloud(cloud_filtered_in_lidar_frame, cloud_in_submap_est,
-                             T_SUBMAPEST_LIDAR);
-    map_in_submap_est += cloud_in_submap_est;
-  }
-
-  PointCloudIRT::Ptr map_in_world_est = std::make_shared<PointCloudIRT>();
-  pcl::transformPointCloud(map_in_submap_est, *map_in_world_est,
-                           T_WORLD_SUBMAP_EST);
-  PointCloudIRT registered_cloud;
-  icp_->setInputSource(map_in_world_est);
-  icp_->align(registered_cloud);
-  Eigen::Matrix4d T_WORLD_WORLDEST =
-      icp_->getFinalTransformation().cast<double>();
-  BEAM_INFO("Registration time: {}s", timer_.elapsed());
-  T_WORLD_SUBMAP_ALIGNED_ = beam::InvertTransform(T_WORLD_WORLDEST) * T_WORLD_SUBMAP_EST;
-}
-
 bool ScanPoseGtGeneration::GetT_WORLD_MOVING(const ros::Time& timestamp,
                                              Eigen::Matrix4d& T_WORLD_MOVING) {
-  Eigen::Matrix4d T_WORLD_MOVING_INIT;
-  bool successful = GetT_WORLD_MOVING_INIT(timestamp, T_WORLD_MOVING_INIT);
+  Eigen::Matrix4d T_WORLDINIT_MOVING;
+  bool successful = GetT_WORLD_MOVING_INIT(timestamp, T_WORLDINIT_MOVING);
   if (!successful) { return false; }
 
-  Eigen::Matrix4d T_SUBMAP_MOVING =
-      beam::InvertTransform(T_WORLD_SUBMAP_INIT_) * T_WORLD_MOVING_INIT;
-  T_WORLD_MOVING = T_WORLD_SUBMAP_ALIGNED_ * T_SUBMAP_MOVING;
+  // get T_WORLD_WORLDINIT average
+  Eigen::Matrix4d T_WORLD_WORLDINIT_AVG = Eigen::Matrix4d::Identity();
+  if (!T_WORLD_WORLDINIT_.empty()) {
+    T_WORLD_WORLDINIT_AVG = beam::AverageTransforms(T_WORLD_WORLDINIT_);
+  }
+
+  // todo replace this
+  T_WORLD_MOVING = T_WORLD_WORLDINIT_AVG * T_WORLDINIT_MOVING;
   return true;
 }
 
@@ -413,11 +361,13 @@ void ScanPoseGtGeneration::SaveMaps() {
       "map_raw_" + std::to_string(trajectories_raw_.size());
   SaveMap(*trajectories_raw_.rbegin(), map_filename1);
   trajectories_raw_.rbegin()->map_filename = map_filename1;
+  SaveTrajectory(*trajectories_raw_.rbegin());
 
   std::string map_filename2 =
       "map_spline_" + std::to_string(trajectories_spline_.size());
   SaveMap(*trajectories_spline_.rbegin(), map_filename2);
   trajectories_spline_.rbegin()->map_filename = map_filename2;
+  SaveTrajectory(*trajectories_spline_.rbegin());
   current_traj_scans_in_lidar_.clear();
 }
 
@@ -444,50 +394,55 @@ void ScanPoseGtGeneration::SaveMap(const Trajectory& trajectory,
   BEAM_INFO("saving map of size {} to: {}", map.size(), map_filepath);
   if (!beam::SavePointCloud<PointXYZIRT>(
           map_filepath, map, beam::PointCloudFileType::PCDBINARY, err)) {
-    BEAM_CRITICAL("unable to save map, reason: {}", err);
-    throw std::runtime_error{"unable to save map"};
+    BEAM_ERROR("unable to save map, reason: {}", err);
   }
+}
+
+void ScanPoseGtGeneration::SaveTrajectory(const Trajectory& trajectory) {
+  if (trajectory.Size() == 0) { return; }
+
+  beam_mapping::Poses poses_current;
+  for (const beam::Pose& p : trajectory.GetPoses()) {
+    ros::Time time_ros;
+    time_ros.fromNSec(p.timestampInNs);
+    poses_current.AddSingleTimeStamp(time_ros);
+    poses_current.AddSinglePose(p.T_FIXED_MOVING);
+  }
+  poses_current.SetFixedFrame(world_frame_id_);
+  poses_current.SetMovingFrame(moving_frame_id_);
+  std::string poses_name = beam::CombinePaths(
+      poses_save_dir_, trajectory.map_filename + "_poses.json");
+  poses_current.WriteToFile(poses_name, "JSON");
+  trajectory_names_.push_back(poses_name);
+  poses_name = beam::CombinePaths(poses_save_dir_,
+                                  trajectory.map_filename + "_poses.pcd");
+  BEAM_INFO("saving {} poses for trajectory to: {}",
+            poses_current.GetTimeStamps().size(), poses_name);
+  poses_current.WriteToFile(poses_name, "PCD");
 }
 
 void ScanPoseGtGeneration::SaveTrajectories(
     const std::vector<Trajectory>& trajectory, const std::string& name) {
-  std::vector<std::string> trajectory_names;
-  beam_mapping::Poses poses_all;
-  int counter{0};
-  for (const Trajectory& t : trajectory) {
-    if (t.Size() == 0) { continue; }
-    counter++;
-    beam_mapping::Poses poses_current;
-    for (const beam::Pose& p : t.GetPoses()) {
-      ros::Time time_ros;
-      time_ros.fromNSec(p.timestampInNs);
-      poses_current.AddSingleTimeStamp(time_ros);
-      poses_current.AddSinglePose(p.T_FIXED_MOVING);
-      poses_all.AddSingleTimeStamp(time_ros);
-      poses_all.AddSinglePose(p.T_FIXED_MOVING);
-    }
-    poses_current.SetFixedFrame(world_frame_id_);
-    poses_current.SetMovingFrame(moving_frame_id_);
-    std::string poses_name =
-        beam::CombinePaths(poses_save_dir_, t.map_filename + "_poses.json");
-    BEAM_INFO("saving {} poses for trajectory {}",
-              poses_current.GetTimeStamps().size(), counter);
-    poses_current.WriteToFile(poses_name, "JSON");
-    trajectory_names.push_back(poses_name);
-    poses_name =
-        beam::CombinePaths(poses_save_dir_, t.map_filename + "_poses.pcd");
-    poses_current.WriteToFile(poses_name, "PCD");
-  }
-
   // save list of trajectories
   nlohmann::json J;
-  J["trajectories"] = trajectory_names;
+  J["trajectories"] = trajectory_names_;
   std::string filename =
       beam::CombinePaths(root_save_dir_, name + "_list.json");
   std::ofstream o(filename);
   o << std::setw(4) << J << std::endl;
 
   // save combined
+  beam_mapping::Poses poses_all;
+  for (const Trajectory& t : trajectory) {
+    if (t.Size() == 0) { continue; }
+    beam_mapping::Poses poses_current;
+    for (const beam::Pose& p : t.GetPoses()) {
+      ros::Time time_ros;
+      time_ros.fromNSec(p.timestampInNs);
+      poses_all.AddSingleTimeStamp(time_ros);
+      poses_all.AddSinglePose(p.T_FIXED_MOVING);
+    }
+  }
   poses_all.SetFixedFrame(world_frame_id_);
   poses_all.SetMovingFrame(moving_frame_id_);
   std::string combined_name =
