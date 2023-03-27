@@ -4,6 +4,7 @@
   "point_size": 4,
   "max_spline_length_m": 3,
   "min_spline_measurements": 10,
+  "run_refinement": true,
   "scan_filters": [
     {
       "filter_type": "CROPBOX",
@@ -34,6 +35,44 @@
       "remove_outside_points": true
     }
   ],
+  "scan_filters_refinement": [
+    {
+      "filter_type": "CROPBOX",
+      "min": [
+        -0.6,
+        -0.5,
+        -0.5
+      ],
+      "max": [
+        0.6,
+        0.5,
+        0.5
+      ],
+      "remove_outside_points": false
+    },
+    {
+      "filter_type": "CROPBOX",
+      "min": [
+        -15,
+        -15,
+        -15
+      ],
+      "max": [
+        15,
+        15,
+        15
+      ],
+      "remove_outside_points": true
+    },
+    {
+      "filter_type": "VOXEL",
+      "cell_size": [
+        0.02,
+        0.02,
+        0.02
+      ]
+    }
+  ],
   "gt_cloud_filters": [
     {
       "filter_type": "VOXEL",
@@ -41,6 +80,16 @@
         0.02,
         0.02,
         0.02
+      ]
+    }
+  ],
+  "gt_cloud_filters_refinement": [
+    {
+      "filter_type": "VOXEL",
+      "cell_size": [
+        0.015,
+        0.015,
+        0.015
       ]
     }
   ],

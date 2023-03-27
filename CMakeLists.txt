@@ -13,12 +13,15 @@ find_package(
   calibration
 )
 
+find_package(OpenMP)
+
 
 ## Declare a C++ library
 add_library(
   ${PROJECT_NAME}
   src/ScanPoseGtGeneration.cpp
 )
+
 target_include_directories(${PROJECT_NAME}
   PUBLIC
     include
@@ -31,6 +34,7 @@ target_link_libraries(
     beam::filtering
     beam::mapping
     beam::calibration
+    OpenMP::OpenMP_CXX
 )
 
 ################ Executables ###################

@@ -25,14 +25,23 @@ public:
     std::string extrinsics;
     std::string topic;
     std::string config;
+    int start_offset_s{0};
+    int end_offset_s{0};
     bool visualize;
   };
 
-  struct IcpParams {
+  struct IcpParamsInit {
     double max_corr_dist{0.4};
     int max_iterations{40};
     double transform_eps{1e-8};
     double fitness_eps{1e-2};
+  };
+
+  struct IcpParamsRef {
+    double max_corr_dist{0.05};
+    int max_iterations{20};
+    double transform_eps{1e-9};
+    double fitness_eps{1e-3};
   };
 
   struct Params {
@@ -41,7 +50,9 @@ public:
     bool extract_loam_points{true};
     double max_spline_length_m{5};
     double min_spline_measurements{10};
-    IcpParams icp_params;
+    bool run_refinement{true};
+    IcpParamsInit icp_params;
+    IcpParamsRef icp_params_refinement;
   };
 
   class Trajectory {
@@ -50,11 +61,27 @@ public:
 
     std::string map_filename;
 
-    const std::vector<beam::Pose>& GetPoses() const { return poses_; }
+    const std::map<int64_t, beam::Pose>& GetPoses() const { return poses_; }
 
     int Size() const { return poses_.size(); }
 
     double Length() const { return length_; }
+
+    bool GetPose(int64_t timestampInNs, Eigen::Matrix4d& T_FIXED_MOVING) const {
+      auto iter = poses_.find(timestampInNs);
+      if (iter == poses_.end()) { return false; }
+      T_FIXED_MOVING = iter->second.T_FIXED_MOVING;
+      return true;
+    }
+
+    bool UpdatePose(int64_t timestampInNs, Eigen::Matrix4d& T_FIXED_MOVING) {
+      auto iter = poses_.find(timestampInNs);
+      if (iter == poses_.end()) { return false; }
+      iter->second.T_FIXED_MOVING = T_FIXED_MOVING;
+      return true;
+    }
+
+    void RemovePose(int64_t timestampInNs) { poses_.erase(timestampInNs); }
 
     void AddPose(int64_t timestampInNs, const Eigen::Matrix4d& T_FIXED_MOVING) {
       beam::Pose pose;
@@ -63,16 +90,16 @@ public:
 
       if (poses_.size() > 1) {
         Eigen::Vector3d t_last =
-            poses_.rbegin()->T_FIXED_MOVING.block(0, 3, 3, 1);
+            poses_.rbegin()->second.T_FIXED_MOVING.block(0, 3, 3, 1);
         Eigen::Vector3d t_cur = T_FIXED_MOVING.block(0, 3, 3, 1);
         length_ += (t_last - t_cur).norm();
       }
 
-      poses_.push_back(pose);
+      poses_.emplace(timestampInNs, pose);
     }
 
   private:
-    std::vector<beam::Pose> poses_;
+    std::map<int64_t, beam::Pose> poses_;
     double length_{0};
   };
 
@@ -91,20 +118,19 @@ private:
   void LoadGtCloud();
   void keyboardEventOccurred(const pcl::visualization::KeyboardEvent& event);
   void LoadTrajectory();
-  void SetupRegistration();
   void RegisterScans();
-  void RegisterSingleScan(const PointCloudIRT& cloud_in_lidar_frame,
-                          const ros::Time& timestamp);
+  void ProcessSingleScan(const PointCloudIRT& cloud_in_lidar_frame,
+                         const ros::Time& timestamp);
+  void RegisterCurrentTrajectoryScansInParallel();
+  void RegisterCurrentTrajectoryScans();
   PointCloudIRT ExtractStrongLoamPoints(const PointCloudIRT& cloud_in);
   bool GetT_WORLD_MOVING(const ros::Time& timestamp,
-                            Eigen::Matrix4d& T_WORLD_MOVING);
+                         Eigen::Matrix4d& T_WORLD_MOVING);
   bool GetT_WORLD_MOVING_INIT(const ros::Time& timestamp,
-                                Eigen::Matrix4d& T_WORLD_MOVING);
-  void AddRegistrationResult(const PointCloudIRT& cloud_in_lidar_frame,
-                             const Eigen::Matrix4d& T_WORLD_LIDAR,
-                             const ros::Time& timestamp);
+                              Eigen::Matrix4d& T_WORLD_MOVING);
   bool IsMapFull();
   void FitSplineToTrajectory();
+  void RunRefinement();
   void SaveMaps();
   void SaveMap(const Trajectory& trajectory, const std::string& name);
   void SaveTrajectory(const Trajectory& trajectory);
@@ -120,23 +146,31 @@ private:
   std::unordered_map<int64_t, PointCloudIRT> current_traj_scans_in_lidar_;
   std::vector<Trajectory> trajectories_raw_;
   std::vector<Trajectory> trajectories_spline_;
-  std::list<Eigen::Matrix4d, beam::AlignMat4d> T_WORLD_WORLDINIT_;
-  int pose_drift_queue_size_{6};
+  Eigen::Matrix4d T_WORLD_WORLDINIT_AVG_{Eigen::Matrix4d::Identity()};
   beam_calibration::TfTree input_trajectory_;
   PointCloudIRT::Ptr gt_cloud_in_world_;
+  PointCloudIRT::Ptr gt_cloud_refinement_in_world_;
   Eigen::Matrix4d T_MOVING_LIDAR_;
   std::string world_frame_id_;
   std::string moving_frame_id_;
   std::string lidar_frame_id_;
+  int64_t start_time_ns;
+  int64_t end_time_ns;
 
   std::vector<beam_filtering::FilterParamsType> scan_filters_;
+  std::vector<beam_filtering::FilterParamsType> scan_filters_refinement_;
   std::vector<beam_filtering::FilterParamsType> gt_cloud_filters_;
+  std::vector<beam_filtering::FilterParamsType> gt_cloud_filters_refinement_;
   std::vector<beam_filtering::FilterParamsType> output_filters_;
 
   std::string map_save_dir_;
   std::string poses_save_dir_;
   std::string root_save_dir_;
-  std::vector<std::string> trajectory_names_;
+  // std::vector<std::string> trajectory_names_;
+  // std::vector<std::string> trajectory_names_raw_;
+  // std::vector<std::string> trajectory_names_spline_;
+  // std::vector<std::string> map_names_raw_;
+  // std::vector<std::string> map_names_spline_;
 
   beam::HighResolutionTimer timer_;
   int scan_counter_{0};
@@ -146,7 +180,6 @@ private:
 
   // registration
   using IcpType = pcl::IterativeClosestPoint<PointXYZIRT, PointXYZIRT>;
-  std::unique_ptr<IcpType> icp_;
 };
 
 } // namespace scan_pose_gt_gen

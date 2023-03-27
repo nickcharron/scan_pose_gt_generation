@@ -37,9 +37,16 @@ DEFINE_string(topic, "",
               "topic name for the lidar data you want to generate GT for");
 DEFINE_validator(topic, &beam::gflags::ValidateCannotBeEmpty);
 DEFINE_string(config, "",
-              "full path to config file, example file found in config/config_example.json");
+              "full path to config file, example file found in "
+              "config/config_example.json");
 DEFINE_validator(config, &beam::gflags::ValidateFileMustExist);
 DEFINE_bool(visualize, true, "display registration results for each scan");
+DEFINE_double(
+    start_offset, 0,
+    "time offset in seconds to start generating GT from start of poses");
+DEFINE_double(
+    end_offset, 0,
+    "time offset in seconds to start generating GT from start of poses");
 
 int main(int argc, char* argv[]) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
@@ -54,6 +61,8 @@ int main(int argc, char* argv[]) {
   inputs.topic = FLAGS_topic;
   inputs.config = FLAGS_config;
   inputs.visualize = FLAGS_visualize;
+  inputs.start_offset_s = FLAGS_start_offset;
+  inputs.end_offset_s = FLAGS_end_offset;
   scan_pose_gt_gen::ScanPoseGtGeneration gt_generator(inputs);
   gt_generator.run();
 

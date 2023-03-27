@@ -10,6 +10,7 @@
 DEFINE_string(input_directory, "",
               "Full path to output directory of run_gt_generation");
 DEFINE_validator(input_directory, &beam::gflags::ValidateDirMustExist);
+DEFINE_string(type, "RAW", "Options: RAW, SPLINE");
 
 class ResultsVisualizer {
 public:
@@ -73,7 +74,7 @@ private:
         data_.gt_cloud_in_world, 255, 255, 255);
     viewer_.addPointCloud<pcl::PointXYZ>(data_.gt_cloud_in_world, col, "GTMap");
     viewer_.setPointCloudRenderingProperties(
-          pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, "GTMap");
+        pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, "GTMap");
     viewer_.addCoordinateSystem(1.0);
     std::function<void(const pcl::visualization::KeyboardEvent&)> keyboard_cb =
         [this](const pcl::visualization::KeyboardEvent& event) {
@@ -130,19 +131,26 @@ private:
 
     // load results
     nlohmann::json J2;
-    std::string results_file = beam::CombinePaths(dir, "results_summary.json");
+    std::string results_file = beam::CombinePaths(dir, "output_list.json");
     BEAM_INFO("Reading results json: {}", results_file);
     if (!beam::ReadJson(results_file, J2)) {
-      throw std::runtime_error{"Invalid gt_cloud_pose json"};
+      BEAM_CRITICAL("cannot read output list file: {}", results_file);
+      throw std::runtime_error{"cannot read output list file"};
     }
-    if (!J2.contains("map_names")) {
-      throw std::runtime_error{
-          "invalid results file, no field named map_names"};
+    if (!J2.contains("raw") || !J2.contains("spline")) {
+      throw std::runtime_error{"invalid output list file"};
     }
-    std::vector<std::string> map_names = J2["map_names"];
-    std::string map_dir = beam::CombinePaths(dir, "gt_maps");
+    std::vector<std::string> map_names;
+    if (FLAGS_type == "RAW") {
+      map_names = J2["raw"].get<std::vector<std::string>>();
+    } else if (FLAGS_type == "SPLINE") {
+      map_names = J2["spline"].get<std::vector<std::string>>();
+    } else {
+      throw std::invalid_argument{"invalid type input"};
+    }
+    std::string map_dir = beam::CombinePaths(dir, "submaps");
     for (const auto& name : map_names) {
-      data_.maps.push_back(beam::CombinePaths(map_dir, name));
+      data_.maps.push_back(beam::CombinePaths(map_dir, name + ".pcd"));
     }
   }
 
