@@ -3,9 +3,12 @@
 #include <pcl/visualization/pcl_visualizer.h>
 
 #include <beam_filtering/Utils.h>
+#include <beam_mapping/Poses.h>
 #include <beam_utils/gflags.h>
 #include <beam_utils/kdtree.h>
+#include <beam_utils/math.h>
 #include <beam_utils/pointclouds.h>
+#include <beam_utils/time.h>
 
 DEFINE_string(input_directory, "",
               "Full path to output directory of run_gt_generation");
@@ -20,15 +23,17 @@ public:
   };
 
   explicit ResultsVisualizer(const std::string& input_dir) {
-    LoadResultsData(input_dir);
+    input_dir_ = input_dir;
+    LoadResultsData();
     Setup();
   }
 
   void Run() {
+    std::vector<std::string> maps_to_save;
     for (const auto& map_path : data_.maps) {
       PointCloud map;
-      BEAM_INFO("loading map: {}", map_path);
-      pcl::io::loadPCDFile(map_path, map);
+      BEAM_INFO("loading map: {}", map_path + ".pcd");
+      pcl::io::loadPCDFile(map_path + ".pcd", map);
       if (map.empty()) {
         BEAM_ERROR("empty input map.");
         throw std::runtime_error{"empty input map"};
@@ -43,15 +48,50 @@ public:
       viewer_.setPointCloudRenderingProperties(
           pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "CurrentMap");
       next_scan_ = false;
+      std::cout << "Press 's' to save the current pose, or 'n' to exclude it\n";
       while (!viewer_.wasStopped() && !next_scan_) { viewer_.spinOnce(); }
+      if (save_traj_) { maps_to_save.push_back(map_path); }
     }
+
+    CombinePoses(maps_to_save);
   }
 
 private:
+  void CombinePoses(const std::vector<std::string>& map_paths) {
+    std::string date =
+        beam::ConvertTimeToDate(std::chrono::system_clock::now());
+    std::string save_path_json =
+        beam::CombinePaths(input_dir_, date + "_filtered_trajectory.json");
+    std::string save_path_pcd =
+        beam::CombinePaths(input_dir_, date + "_filtered_trajectory.pcd");
+
+    beam_mapping::Poses poses_combined;
+    for (const auto& path : map_paths) {
+      std::string traj_name = beam::CombinePaths(path, "_poses.json");
+      beam_mapping::Poses poses;
+      if (!poses.LoadFromFile(traj_name)) {
+        throw std::invalid_argument{"Invalid pose file"};
+      }
+      std::vector<ros::Time> ts = poses.GetTimeStamps();
+      std::vector<Eigen::Matrix4d, beam::AlignMat4d> ps = poses.GetPoses();
+      for (int i = 0; i < ts.size(); i++) {
+        poses_combined.AddSingleTimeStamp(ts[i]);
+        poses_combined.AddSinglePose(ps[i]);
+      }
+    }
+    poses_combined.WriteToFile(save_path_json, "JSON");
+    poses_combined.WriteToFile(save_path_pcd, "PCD");
+  }
+
   void keyboardEventOccurred(const pcl::visualization::KeyboardEvent& event) {
     if (event.getKeySym() == "n" && event.keyDown()) {
-      BEAM_INFO("displaying next scan...");
+      BEAM_INFO("discarding trajectory...");
       next_scan_ = true;
+      save_traj_ = false;
+    } else if (event.getKeySym() == "n" && event.keyDown()) {
+      BEAM_INFO("saving trajectory...");
+      next_scan_ = true;
+      save_traj_ = true;
     }
   }
 
@@ -85,8 +125,9 @@ private:
         std::make_unique<beam::KdTree<pcl::PointXYZ>>(*data_.gt_cloud_in_world);
   }
 
-  void LoadResultsData(const std::string& dir) {
-    std::string gt_cloud_p = beam::CombinePaths(dir, "gt_cloud_copy.pcd");
+  void LoadResultsData() {
+    std::string gt_cloud_p =
+        beam::CombinePaths(input_dir_, "gt_cloud_copy.pcd");
     BEAM_INFO("Loading gt cloud: {}", gt_cloud_p);
     PointCloud gt_cloud_in;
     pcl::io::loadPCDFile(gt_cloud_p, gt_cloud_in);
@@ -96,7 +137,7 @@ private:
     }
 
     std::string gt_cloud_pose =
-        beam::CombinePaths(dir, "gt_cloud_pose_copy.json");
+        beam::CombinePaths(input_dir_, "gt_cloud_pose_copy.json");
     BEAM_INFO("Loading gt cloud pose: {}", gt_cloud_pose);
     nlohmann::json J;
     if (!beam::ReadJson(gt_cloud_pose, J)) {
@@ -131,7 +172,8 @@ private:
 
     // load results
     nlohmann::json J2;
-    std::string results_file = beam::CombinePaths(dir, "output_list.json");
+    std::string results_file =
+        beam::CombinePaths(input_dir_, "output_list.json");
     BEAM_INFO("Reading results json: {}", results_file);
     if (!beam::ReadJson(results_file, J2)) {
       BEAM_CRITICAL("cannot read output list file: {}", results_file);
@@ -148,14 +190,16 @@ private:
     } else {
       throw std::invalid_argument{"invalid type input"};
     }
-    std::string map_dir = beam::CombinePaths(dir, "submaps");
+    std::string map_dir = beam::CombinePaths(input_dir_, "submaps");
     for (const auto& name : map_names) {
-      data_.maps.push_back(beam::CombinePaths(map_dir, name + ".pcd"));
+      data_.maps.push_back(beam::CombinePaths(map_dir, name));
     }
   }
 
   ResultsData data_;
+  std::string input_dir_;
   bool next_scan_{false};
+  bool save_traj_{true};
   double max_distance_to_gt_{2};
   std::unique_ptr<beam::KdTree<pcl::PointXYZ>> kdtree_;
   pcl::visualization::PCLVisualizer viewer_;

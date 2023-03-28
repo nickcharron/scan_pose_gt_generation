@@ -280,7 +280,8 @@ void ScanPoseGtGeneration::RegisterCurrentTrajectoryScans() {
                              T_WORLDEST_LIDAR);
 
     // run ICP
-    BEAM_INFO("Running registration for scan {}/{}", i, total_scans_);
+    BEAM_INFO("Running registration for scan {}/{}", scan_counter_,
+              total_scans_);
     beam::HighResolutionTimer timer;
     timer.restart();
     PointCloudIRT registered_cloud;
