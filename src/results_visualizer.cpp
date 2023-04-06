@@ -39,25 +39,20 @@ public:
         throw std::runtime_error{"empty input map"};
       }
 
-      viewer1_.removePointCloud("CurrentMap");
-      viewer2_.removePointCloud("CurrentMap");
+      viewer_.removePointCloud("CurrentMap");
       PointCloudPtr map_filtered = std::make_shared<PointCloud>();
       *map_filtered = FilterPointsCloseToGt(map);
       pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> col(
           map_filtered, 0, 255, 0);
-      viewer1_.addPointCloud<pcl::PointXYZ>(map_filtered, col, "CurrentMap");
-      viewer2_.addPointCloud<pcl::PointXYZ>(map_filtered, col, "CurrentMap");
-      viewer1_.setPointCloudRenderingProperties(
-          pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "CurrentMap");
-      viewer2_.setPointCloudRenderingProperties(
+      viewer_.addPointCloud<pcl::PointXYZ>(map_filtered, col, "CurrentMap");
+      viewer_.setPointCloudRenderingProperties(
           pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "CurrentMap");
 
       next_scan_ = false;
       std::cout << "Press 's' to save the current pose, 'n' to exclude it, or "
                    "'e' to exit\n";
-      while (!viewer1_.wasStopped() && !next_scan_) {
-        viewer1_.spinOnce();
-        viewer2_.spinOnce();
+      while (!viewer_.wasStopped() && !next_scan_) {
+        viewer_.spinOnce();
       }
       if (save_traj_) { maps_to_save.push_back(map_path); }
       if (quit_) { break; }
@@ -139,19 +134,13 @@ private:
         };
     pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> col(
         data_.gt_cloud_in_world, 255, 255, 255);
-    viewer1_.addPointCloud<pcl::PointXYZ>(data_.gt_cloud_in_world, col,
+    viewer_.addPointCloud<pcl::PointXYZ>(data_.gt_cloud_in_world, col,
                                           "GTMap");
-    viewer1_.setPointCloudRenderingProperties(
+    viewer_.setPointCloudRenderingProperties(
         pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, "GTMap");
-    viewer1_.addCoordinateSystem(1.0);
-    viewer1_.registerKeyboardCallback(keyboard_cb);
+    viewer_.addCoordinateSystem(1.0);
+    viewer_.registerKeyboardCallback(keyboard_cb);
 
-    viewer2_.addPointCloud<pcl::PointXYZ>(data_.gt_cloud_in_world, col,
-                                          "GTMap");
-    viewer2_.setPointCloudRenderingProperties(
-        pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 2, "GTMap");
-    viewer2_.addCoordinateSystem(1.0);
-    viewer2_.registerKeyboardCallback(keyboard_cb);
     kdtree_ =
         std::make_unique<beam::KdTree<pcl::PointXYZ>>(*data_.gt_cloud_in_world);
   }
@@ -234,8 +223,7 @@ private:
   bool quit_{false};
   double max_distance_to_gt_{2};
   std::unique_ptr<beam::KdTree<pcl::PointXYZ>> kdtree_;
-  pcl::visualization::PCLVisualizer viewer1_;
-  pcl::visualization::PCLVisualizer viewer2_;
+  pcl::visualization::PCLVisualizer viewer_;
 };
 
 int main(int argc, char* argv[]) {

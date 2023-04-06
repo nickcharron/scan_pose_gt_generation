@@ -166,11 +166,6 @@ private:
   std::string map_save_dir_;
   std::string poses_save_dir_;
   std::string root_save_dir_;
-  // std::vector<std::string> trajectory_names_;
-  // std::vector<std::string> trajectory_names_raw_;
-  // std::vector<std::string> trajectory_names_spline_;
-  // std::vector<std::string> map_names_raw_;
-  // std::vector<std::string> map_names_spline_;
 
   beam::HighResolutionTimer timer_;
   int scan_counter_{0};

@@ -2,7 +2,24 @@
 
 ## Goal 
 
-The goal of this repo is to create a tool for automatically generating ground truth pose of a lidar given an initial estimated trajectory and a high quality ground truth map (usually generated with a TLS such as Faro or Leica Scanner)
+The goal of this repo is to create a tool for automatically generating ground truth (GT) pose of a lidar given an initial estimated trajectory and a high quality ground truth map (usually generated with a TLS such as Faro or Leica Scanner)
+
+We also provide a visualizer to view results, and crop down the output trajectory to only successful results
+
+## Installing
+
+cd ~/code_path
+
+## Tutorial
+
+This tutorial will run though generating GT with an example
+
+(1) download the two example files from [this link](https://drive.google.com/drive/folders/1bAhRpu_As0sGS_tI8mjO6d2NTeJn8nDz?usp=share_link) and save to ~/example_data
+(2) run the GT generation binary using the data/configs in the repo:
+
+```
+
+```
 
 ## Inputs
 (1) GT Cloud: pointcloud .pcd format that we will use to register our lidar scans against. See example file [faro_scan_example.pcd](https://drive.google.com/drive/folders/1bAhRpu_As0sGS_tI8mjO6d2NTeJn8nDz?usp=share_link) \
