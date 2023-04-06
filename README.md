@@ -52,7 +52,7 @@ Setting visualize to true will open up a viewer as shown below:
 
 When the binary is complete, you should see the following outputs
 
-![example outputs](imgs/ExampleOutputs.png "Outputs")
+![example outputs](imgs/ExampleOutput.png "Outputs")
 
 To visualize the final result and filter failed submaps, run:
 
